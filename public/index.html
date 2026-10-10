@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TPS 3D マルチプレイヤーゲーム</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            user-select: none;
+            font-family: sans-serif;
+            background: #000;
+        }
+
+        /* 操作説明UI */
+        #instructions {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 12px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            z-index: 20;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            max-width: 290px;
+        }
+
+        .instructions-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .instructions-header h3 {
+            margin: 0;
+            font-size: 14px;
+        }
+
+        #toggle-instructions-btn {
+            background: rgba(255, 255, 255, 0.2);
+            color: #ffcc00;
+            border: none;
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            outline: none;
+        }
+
+        #toggle-instructions-btn:hover {
+            background: rgba(255, 255, 255, 0.35);
+        }
+
+        #instructions-body {
+            margin-top: 8px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            margin-top: 5px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 11px;
+            background: #555;
+        }
+
+        .status-badge.connected {
+            background: #28a745;
+        }
+
+        /* ダッシュゲージ */
+        #dash-container {
+            position: absolute;
+            bottom: 25px;
+            left: 25px;
+            width: 220px;
+            background: rgba(10, 15, 25, 0.8);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            padding: 10px 14px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            z-index: 20;
+        }
+
+        .dash-label-row {
+            display: flex;
+            justify-content: space-between;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
+
+        #dash-bar-bg {
+            width: 100%;
+            height: 14px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 7px;
+            overflow: hidden;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5);
+        }
+
+        #dash-bar-fill {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, #ffcc00, #00ff88);
+            border-radius: 7px;
+            transition: width 0.05s linear, background 0.2s;
+        }
+
+        #dash-bar-fill.exhausted {
+            background: #ff3344 !important;
+        }
+
+        /* ===================================================
+           【画面右下：スキルアイコンラッパー（2つ並列）】
+        =================================================== */
+        #skills-wrapper {
+            position: absolute;
+            bottom: 25px;
+            right: 25px;
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            z-index: 20;
+            pointer-events: none;
+        }
+
+        /* スキル四角形ボックス共通スタイル */
+        .skill-box {
+            position: relative;
+            width: 72px;
+            height: 72px;
+            border-radius: 12px;
+            background: #111;
+            border: 3px solid #00d4ff;
+            box-shadow: 0 0 15px rgba(0, 212, 255, 0.5);
+            overflow: hidden;
+        }
+
+        .skill-box img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .skill-cd-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.72);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            color: #00ffcc;
+            font-size: 17px;
+            font-weight: bold;
+            text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+        }
+
+        #skill-spin-stack-badge {
+            position: absolute;
+            bottom: 3px;
+            right: 4px;
+            background: #ffcc00;
+            color: #000;
+            font-size: 13px;
+            font-weight: 900;
+            padding: 1px 6px;
+            border-radius: 6px;
+            border: 2px solid #000;
+        }
+
+        /* 3D酔い防止レイヤー */
+        #cockpit-frame {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            box-sizing: border-box;
+            border: 24px solid rgba(15, 20, 30, 0.75);
+            box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.9);
+            z-index: 10;
+            transition: opacity 0.3s;
+        }
+
+        #horizon-line {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 160px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4) 30%, rgba(255, 255, 255, 0.8) 50%, rgba(255, 255, 255, 0.4) 70%, transparent);
+            pointer-events: none;
+            z-index: 11;
+        }
+
+        #sickness-dot {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 10px;
+            height: 10px;
+            background-color: #00ffcc;
+            box-shadow: 0 0 8px #00ffcc;
+            border: 2px solid rgba(0, 0, 0, 0.8);
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 12;
+        }
+
+        #vignette-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 9;
+            background: radial-gradient(circle, transparent 20%, rgba(0, 0, 0, 0.96) 80%);
+            opacity: 0;
+            transition: opacity 0.15s ease-out;
+        }
+
+        #settings-btn {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            outline: none;
+            transition: background 0.2s;
+            z-index: 20;
+        }
+
+        #settings-btn:hover {
+            background: rgba(50, 50, 50, 0.9);
+        }
+
+        #settings-modal,
+        #keyconfig-modal {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(20, 25, 35, 0.96);
+            color: white;
+            padding: 25px 30px;
+            border-radius: 12px;
+            box-shadow: 0 6px 30px rgba(0, 0, 0, 0.7);
+            min-width: 320px;
+            z-index: 100;
+        }
+
+        #keyconfig-modal {
+            min-width: 480px;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 110;
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 18px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+        }
+
+        .name-input-group {
+            display: flex;
+            margin-top: 8px;
+            gap: 8px;
+        }
+
+        .name-input-group input[type="text"] {
+            flex: 1;
+            padding: 8px 10px;
+            border-radius: 5px;
+            border: 1px solid #555;
+            background: #111;
+            color: white;
+            font-size: 14px;
+        }
+
+        .name-input-group button,
+        .btn-action {
+            padding: 8px 14px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .btn-action {
+            background: #17a2b8;
+            width: 100%;
+            margin-top: 15px;
+            padding: 10px;
+        }
+
+        .name-input-group button:hover {
+            background: #218838;
+        }
+
+        .btn-action:hover {
+            background: #138496;
+        }
+
+        #name-changed-toast {
+            display: none;
+            color: #28a745;
+            font-size: 13px;
+            font-weight: bold;
+            margin-top: 6px;
+        }
+
+        .setting-item {
+            margin: 16px 0;
+            display: flex;
+            align-items: center;
+            font-size: 14px;
+        }
+
+        .setting-item input[type="checkbox"] {
+            margin-right: 12px;
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+        }
+
+        .close-btn {
+            display: block;
+            width: 100%;
+            background: #3366ff;
+            color: white;
+            border: none;
+            padding: 10px 0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 18px;
+        }
+
+        .close-btn:hover {
+            background: #254edb;
+        }
+
+        .config-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 14px;
+        }
+
+        .config-btn {
+            background: #333;
+            color: #ffcc00;
+            border: 1px solid #666;
+            padding: 6px 14px;
+            border-radius: 5px;
+            cursor: pointer;
+            min-width: 130px;
+            text-align: center;
+            font-weight: bold;
+        }
+
+        .config-btn.listening {
+            background: #ff3344;
+            color: white;
+            animation: blink 0.8s infinite;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .keyconfig-btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .btn-reset-config {
+            flex: 1;
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 10px 0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .btn-reset-config:hover {
+            background: #c82333;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="instructions">
+        <div class="instructions-header" id="instructions-header">
+            <h3>📖 操作方法</h3>
+            <button id="toggle-instructions-btn">折りたたむ ▲</button>
+        </div>
+        <div id="instructions-body">
+            <b>[キーボード & マウス]</b><br>
+            ・移動：W, A, S, D<br>
+            ・ダッシュ：左Shift<br>
+            ・視点：右ドラッグ / ホイール<br>
+            ・ジャンプ：スペース<br>
+            ・パンチ：左クリック（長押し溜め）<br>
+            ・回転斬り：E キー（長押し溜め）<br>
+            ・<b>ドラゴンダイブ：R キー（即時発動）</b><br>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.2); margin: 6px 0;">
+            <b>[PS4 コントローラー]</b><br>
+            ・移動：左スティック<br>
+            ・ダッシュ：× ボタン<br>
+            ・視点：右スティック<br>
+            ・ズーム：L1 ＋ 右スティック上下<br>
+            ・ジャンプ：△ ボタン<br>
+            ・パンチ：□ ボタン（長押し溜め）<br>
+            ・回転斬り：L2 ＋ □ ボタン（長押し溜め）<br>
+            ・<b>ドラゴンダイブ：○ ボタン（即時発動）</b><br>
+            <div id="server-status" class="status-badge">サーバー接続待機中...</div>
+            <div id="gamepad-status" class="status-badge">コントローラー未接続</div>
+        </div>
+    </div>
+
+    <!-- 画面左下：ダッシュゲージ -->
+    <div id="dash-container">
+        <div class="dash-label-row">
+            <span>DASH STAMINA</span>
+            <span id="dash-text">100%</span>
+        </div>
+        <div id="dash-bar-bg">
+            <div id="dash-bar-fill"></div>
+        </div>
+    </div>
+
+    <!-- 【新仕様】画面右下：スキルアイコンラッパー（左：回転斬り / 右：ドラゴンダイブ） -->
+    <div id="skills-wrapper">
+        <!-- 1. 回転斬り -->
+        <div class="skill-box" id="skill-spin-box">
+            <img src="spin_slash.png" alt="回転斬り">
+            <div class="skill-cd-overlay" id="skill-spin-cd-overlay"></div>
+            <div id="skill-spin-stack-badge">2</div>
+        </div>
+
+        <!-- 2. ドラゴンダイブ（スタック表示なし・四角形） -->
+        <div class="skill-box" id="skill-dive-box">
+            <img src="dragon_dive.png" alt="ドラゴンダイブ">
+            <div class="skill-cd-overlay" id="skill-dive-cd-overlay"></div>
+        </div>
+    </div>
+
+    <!-- 強力3D酔い防止レイヤー -->
+    <div id="cockpit-frame"></div>
+    <div id="horizon-line"></div>
+    <div id="sickness-dot"></div>
+    <div id="vignette-overlay"></div>
+
+    <button id="settings-btn">⚙ 設定</button>
+
+    <!-- 環境設定モーダル -->
+    <div id="settings-modal">
+        <h2>環境設定</h2>
+        <div>
+            <label style="font-size: 14px;">プレイヤーネーム:</label>
+            <div class="name-input-group">
+                <input type="text" id="player-name-input" maxlength="12" placeholder="名前を入力">
+                <button id="save-name-btn">変更</button>
+            </div>
+            <div id="name-changed-toast">✔ 変更しました</div>
+        </div>
+
+        <label class="setting-item" style="cursor: pointer; margin-top: 18px;">
+            <input type="checkbox" id="invert-y-checkbox" checked>
+            上下視点を反転する
+        </label>
+        <label class="setting-item" style="cursor: pointer;">
+            <input type="checkbox" id="anti-sickness-checkbox" checked>
+            ウルトラ3D酔い防止（バイザー・スタビライザー）
+        </label>
+
+        <button class="btn-action" id="open-keyconfig-btn">🎮 キーコンフィグを開く</button>
+        <button class="close-btn" id="close-settings-btn">閉じる</button>
+    </div>
+
+    <!-- キーコンフィグモーダル -->
+    <div id="keyconfig-modal">
+        <h2>キーコンフィグ</h2>
+        <p style="font-size: 12px; color: #aaa; margin: -4px 0 12px 0;">
+            ボタンをクリック後、キーまたはコントローラーのボタンを押してください。<br>
+            ※ <b>Shift/Ctrl/Alt/L1/L2</b> を押しながら別のキーを押すと、組み合わせ入力として設定できます。
+        </p>
+
+        <h3 style="font-size: 15px; color: #00ffcc; margin: 10px 0 6px 0;">【キーボード ＆ マウス】</h3>
+        <div class="config-row"><span>前進</span><button class="config-btn" id="cfg-forward"></button></div>
+        <div class="config-row"><span>後退</span><button class="config-btn" id="cfg-backward"></button></div>
+        <div class="config-row"><span>左移動</span><button class="config-btn" id="cfg-left"></button></div>
+        <div class="config-row"><span>右移動</span><button class="config-btn" id="cfg-right"></button></div>
+        <div class="config-row"><span>ダッシュ</span><button class="config-btn" id="cfg-dash"></button></div>
+        <div class="config-row"><span>ジャンプ</span><button class="config-btn" id="cfg-jump"></button></div>
+        <div class="config-row"><span>パンチ / 溜め</span><button class="config-btn" id="cfg-punch"></button></div>
+        <div class="config-row"><span>回転斬り / 溜め</span><button class="config-btn" id="cfg-spin-key"></button></div>
+        <div class="config-row"><span>ドラゴンダイブ</span><button class="config-btn" id="cfg-dive-key"></button></div>
+
+        <h3 style="font-size: 15px; color: #00ffcc; margin: 18px 0 6px 0;">【PS4 コントローラー】</h3>
+        <div class="config-row"><span>パンチ / 溜め</span><button class="config-btn" id="cfg-pad-punch"></button></div>
+        <div class="config-row"><span>回転斬り / 溜め</span><button class="config-btn" id="cfg-pad-spin"></button></div>
+        <div class="config-row"><span>ドラゴンダイブ</span><button class="config-btn" id="cfg-pad-dive"></button></div>
+        <div class="config-row"><span>ダッシュ</span><button class="config-btn" id="cfg-pad-dash"></button></div>
+        <div class="config-row"><span>ジャンプ</span><button class="config-btn" id="cfg-pad-jump"></button></div>
+        <div class="config-row"><span>ズームホールド</span><button class="config-btn" id="cfg-pad-zoom"></button></div>
+        <div class="config-row"><span>移動スティック</span><button class="config-btn" id="cfg-pad-move-stick"></button></div>
+        <div class="config-row"><span>視点スティック</span><button class="config-btn" id="cfg-pad-look-stick"></button></div>
+
+        <div class="keyconfig-btn-group">
+            <button class="btn-reset-config" id="reset-keyconfig-btn">初期設定に戻す</button>
+            <button class="close-btn" id="close-keyconfig-btn"
+                style="flex: 2; margin-top: 0; background: #28a745;">完了して閉じる</button>
+        </div>
+    </div>
+
+    <!-- ライブラリの読み込み -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script src="character.js"></script>
+    <script src="controls.js"></script>
+    <script src="main.js"></script>
+</body>
+
+</html>
