@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TPS 3D マルチプレイヤーゲーム</title>
+    <title>3Dbros</title>
     <style>
         body {
             margin: 0;
@@ -120,9 +120,7 @@
             background: #ff3344 !important;
         }
 
-        /* ===================================================
-           【画面右下：スキルアイコンラッパー（2つ並列）】
-        =================================================== */
+        /* 画面右下：スキルアイコンラッパー */
         #skills-wrapper {
             position: absolute;
             bottom: 25px;
@@ -134,7 +132,6 @@
             pointer-events: none;
         }
 
-        /* スキル四角形ボックス共通スタイル */
         .skill-box {
             position: relative;
             width: 72px;
@@ -439,7 +436,7 @@
             ・ジャンプ：スペース<br>
             ・パンチ：左クリック（長押し溜め）<br>
             ・回転斬り：E キー（長押し溜め）<br>
-            ・<b>ドラゴンダイブ：R キー（即時発動）</b><br>
+            ・ドラゴンダイブ：R キー（即時発動）<br>
             <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.2); margin: 6px 0;">
             <b>[PS4 コントローラー]</b><br>
             ・移動：左スティック<br>
@@ -449,7 +446,7 @@
             ・ジャンプ：△ ボタン<br>
             ・パンチ：□ ボタン（長押し溜め）<br>
             ・回転斬り：L2 ＋ □ ボタン（長押し溜め）<br>
-            ・<b>ドラゴンダイブ：○ ボタン（即時発動）</b><br>
+            ・ドラゴンダイブ：○ ボタン（即時発動）<br>
             <div id="server-status" class="status-badge">サーバー接続待機中...</div>
             <div id="gamepad-status" class="status-badge">コントローラー未接続</div>
         </div>
@@ -466,16 +463,13 @@
         </div>
     </div>
 
-    <!-- 【新仕様】画面右下：スキルアイコンラッパー（左：回転斬り / 右：ドラゴンダイブ） -->
+    <!-- 画面右下：スキルアイコンラッパー -->
     <div id="skills-wrapper">
-        <!-- 1. 回転斬り -->
         <div class="skill-box" id="skill-spin-box">
             <img src="spin_slash.png" alt="回転斬り">
             <div class="skill-cd-overlay" id="skill-spin-cd-overlay"></div>
             <div id="skill-spin-stack-badge">2</div>
         </div>
-
-        <!-- 2. ドラゴンダイブ（スタック表示なし・四角形） -->
         <div class="skill-box" id="skill-dive-box">
             <img src="dragon_dive.png" alt="ドラゴンダイブ">
             <div class="skill-cd-overlay" id="skill-dive-cd-overlay"></div>
@@ -555,8 +549,11 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
 
+    <!-- 分割された各モジュールの読み込み -->
     <script src="character.js"></script>
     <script src="controls.js"></script>
+    <script src="stage.js"></script>
+    <script src="combat.js"></script>
     <script src="main.js"></script>
 </body>
 
