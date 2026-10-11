@@ -19,15 +19,37 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const players = {};
 
+// 豊富なカラーパレット（最大10色）
 const playerColors = [
-    0x3366ff, 0xff3366, 0x33cc66, 0xff9900,
-    0x9933ff, 0x00cccc, 0xffcc00, 0xff66cc
+    0x3366ff, // ブルー
+    0xff3344, // レッド
+    0x33cc66, // グリーン
+    0xff9900, // オレンジ
+    0x9933ff, // パープル
+    0x00d4ff, // シアン
+    0xffcc00, // イエロー
+    0xff66cc, // ピンク
+    0x00ffaa, // ミント
+    0xaaaaaa  // シルバー
 ];
+
+// 【新機能】現在誰も使っていないカラーを自動選定する関数
+function getAvailableColor() {
+    const usedColors = Object.values(players).map(p => p.color);
+    // 未使用のカラーを探す
+    const available = playerColors.filter(c => !usedColors.includes(c));
+    if (available.length > 0) {
+        return available[Math.floor(Math.random() * available.length)];
+    }
+    // 全色使われている場合はランダム
+    return playerColors[Math.floor(Math.random() * playerColors.length)];
+}
 
 io.on('connection', (socket) => {
     console.log(`[接続] プレイヤーが入室: ${socket.id}`);
 
-    const randomColor = playerColors[Math.floor(Math.random() * playerColors.length)];
+    // 重複しないカラーを自動割り当て
+    const assignedColor = getAvailableColor();
     const defaultName = `Player_${socket.id.substring(0, 4)}`;
 
     players[socket.id] = {
@@ -37,7 +59,7 @@ io.on('connection', (socket) => {
         y: 0,
         z: (Math.random() - 0.5) * 10,
         rotationY: 0,
-        color: randomColor,
+        color: assignedColor,
         swingAngle: 0,
         isOnGround: true,
         punchRatio: 0,
@@ -45,7 +67,8 @@ io.on('connection', (socket) => {
         isDiving: false,
         diveRatio: 0,
         armScaleZ: 1.0,
-        damage: 0
+        damage: 0,
+        isInvincible: false
     };
 
     socket.emit('init', {
@@ -77,12 +100,13 @@ io.on('connection', (socket) => {
             players[socket.id].isSpinAttack = data.isSpinAttack || false;
             players[socket.id].isDiving = data.isDiving || false;
             players[socket.id].diveRatio = data.diveRatio || 0;
+            players[socket.id].isInvincible = data.isInvincible || false;
 
             socket.broadcast.emit('playerMoved', players[socket.id]);
         }
     });
 
-    // 攻撃命中通知（パンチ・回転斬り・ドラゴンダイブ共通）
+    // 攻撃命中通知
     socket.on('punchHit', (data) => {
         if (players[data.targetId]) {
             players[data.targetId].damage += data.damageDealt;
@@ -98,7 +122,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ドラゴンダイブ衝撃波エフェクトのマルチ同期
     socket.on('spawnShockwave', (data) => {
         socket.broadcast.emit('shockwaveSpawned', {
             x: data.x,
@@ -107,16 +130,19 @@ io.on('connection', (socket) => {
         });
     });
 
+    // リスポーン（無敵時間フラグ付与）
     socket.on('playerRespawn', () => {
         if (players[socket.id]) {
             players[socket.id].damage = 0;
             players[socket.id].x = 0;
             players[socket.id].y = 0;
             players[socket.id].z = 0;
+            players[socket.id].isInvincible = true;
             io.emit('playerDamageReset', { id: socket.id, damage: 0 });
         }
     });
 
+    // 相手が裏画面でも場外に落ちた際の強制リスポーン
     socket.on('targetFellOut', (data) => {
         const tid = data.targetId;
         if (players[tid]) {
@@ -124,6 +150,7 @@ io.on('connection', (socket) => {
             players[tid].x = 0;
             players[tid].y = 0;
             players[tid].z = 0;
+            players[tid].isInvincible = true;
             io.emit('playerForceRespawned', {
                 id: tid,
                 x: 0,

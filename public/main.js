@@ -1,5 +1,5 @@
 // =======================================================
-// モジュール3: ゲームループ・高度16mダイブ・余韻衝撃波
+// モジュール3: ゲームループ・無敵点滅・完全描画保証
 // =======================================================
 
 window.addEventListener('error', (e) => {
@@ -36,7 +36,7 @@ scene.add(dirLight);
 
 // --- 3. ステージ（浮島ステージ 60x60） ---
 const stageSize = 60;
-const halfStage = stageSize / 2; // 30m
+const halfStage = stageSize / 2;
 
 const floorGeo = new THREE.BoxGeometry(stageSize, 2, stageSize);
 const floorMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
@@ -85,6 +85,8 @@ for (let i = 0; i < 35; i++) {
 // --- 4. プレイヤーキャラクター＆各種リーチ予測ガイド ---
 let myName = 'Player';
 let myDamage = 0;
+let myInvincibleTimer = 0; // 【新機能】自機の2秒間無敵タイマー
+
 const myCharacter = createCharacterMesh(0x3366ff, myName, myDamage);
 const playerGroup = myCharacter.mesh;
 scene.add(playerGroup);
@@ -118,7 +120,7 @@ const spinGuide = new THREE.Mesh(spinGuideGeo, spinGuideMat);
 spinGuide.visible = false;
 scene.add(spinGuide);
 
-// --- 【改良：最大到達点8.0mで余韻を残す立体半球衝撃波】 ---
+// 余韻付き半球衝撃波エフェクトプール
 const activeShockwaves = [];
 const domeGeo = new THREE.SphereGeometry(1.0, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
 const ringGeo = new THREE.RingGeometry(0.92, 1.0, 40);
@@ -128,7 +130,6 @@ function createShockwaveEffect(x, y, z) {
     const shockGroup = new THREE.Group();
     shockGroup.position.set(x, y + 0.02, z);
 
-    // 外郭ドーム
     const domeMat = new THREE.MeshBasicMaterial({
         color: 0x00d4ff,
         transparent: true,
@@ -139,7 +140,6 @@ function createShockwaveEffect(x, y, z) {
     const domeMesh = new THREE.Mesh(domeGeo, domeMat);
     shockGroup.add(domeMesh);
 
-    // 外周境界リング（最大到達点を明示する発光枠）
     const ringMat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -158,9 +158,8 @@ function createShockwaveEffect(x, y, z) {
         domeMesh,
         ringMesh,
         time: 0,
-        expandDuration: 0.18, // 0.18秒で8.0mまで急拡大
-        lingerDuration: 0.32, // その後0.32秒間、最大サイズで余韻表示
-        hasDamaged: false
+        expandDuration: 0.18,
+        lingerDuration: 0.32
     });
 }
 
@@ -241,30 +240,32 @@ socket.on('playerMoved', (data) => {
         p.holdingCharge = data.holdingCharge || 0;
         p.isDiving = data.isDiving || false;
         p.diveRatio = data.diveRatio || 0;
+        p.isInvincible = data.isInvincible || false;
         p.isKnockedOut = false;
     }
 });
 
 socket.on('playerKnocked', (data) => {
+    // 【無敵ガード】自分が無敵中なら被弾を完全無効化！
     if (data.targetId === myId) {
+        if (myInvincibleTimer > 0) return;
+
         myDamage = data.newDamage;
         updateNameSpriteDamage(myCharacter.nameObj, myDamage);
         Controls.cancelPunchCharge();
 
-        // ダイブ中の被弾キャンセル
-        if (isDiving) {
-            isDiving = false;
-        }
+        if (isDiving) isDiving = false;
 
-        // 被弾フラグを立てる
         isKnockedBack = true;
-
         velocityX = data.dirX * data.force;
         velocityZ = data.dirZ * data.force;
         yVelocity = 8.5 + (myDamage / 80.0) * 4.0;
         isOnGround = false;
     } else if (otherPlayers[data.targetId]) {
         const op = otherPlayers[data.targetId];
+        // 相手が無敵中なら被弾しない
+        if (op.invincibleTimer > 0) return;
+
         op.damage = data.newDamage;
         updateNameSpriteDamage(op.nameObj, op.damage);
 
@@ -283,6 +284,7 @@ socket.on('shockwaveSpawned', (data) => {
     createShockwaveEffect(data.x, data.y, data.z);
 });
 
+// 【新機能】リスポーン時に2秒間無敵を付与
 socket.on('playerForceRespawned', (data) => {
     if (data.id === myId) {
         playerGroup.position.set(data.x, 0, data.z);
@@ -292,6 +294,7 @@ socket.on('playerForceRespawned', (data) => {
         isOnGround = true;
         isKnockedBack = false;
         myDamage = 0;
+        myInvincibleTimer = 2.0; // 自機に2秒無敵付与
         updateNameSpriteDamage(myCharacter.nameObj, 0);
     } else if (otherPlayers[data.id]) {
         const op = otherPlayers[data.id];
@@ -300,6 +303,7 @@ socket.on('playerForceRespawned', (data) => {
         op.targetZ = data.z;
         op.mesh.position.set(data.x, 0, data.z);
         op.damage = 0;
+        op.invincibleTimer = 2.0; // 相手に2秒無敵付与
         updateNameSpriteDamage(op.nameObj, 0);
         op.kbVX = 0;
         op.kbVY = 0;
@@ -312,9 +316,11 @@ socket.on('playerForceRespawned', (data) => {
 socket.on('playerDamageReset', (data) => {
     if (data.id === myId) {
         myDamage = 0;
+        myInvincibleTimer = 2.0; // 自発的リスポーン時も2秒無敵
         updateNameSpriteDamage(myCharacter.nameObj, 0);
     } else if (otherPlayers[data.id]) {
         otherPlayers[data.id].damage = 0;
+        otherPlayers[data.id].invincibleTimer = 2.0;
         updateNameSpriteDamage(otherPlayers[data.id].nameObj, 0);
     }
 });
@@ -375,7 +381,8 @@ function addOtherPlayer(data) {
         isKnockedOut: false,
         isAttacker: false,
         hasReportedSettlement: false,
-        hasReportedFall: false
+        hasReportedFall: false,
+        invincibleTimer: 0 // 相手の無敵タイマー
     };
 }
 
@@ -422,7 +429,7 @@ function unstickFromObstacles(pos) {
     }
 }
 
-function moveWithCollision(pos, vx, vz, delta) {
+function moveWithCollision(pos, vx, vz, delta, isKnocked = false) {
     const totalDist = Math.hypot(vx * delta, vz * delta);
     const steps = totalDist > 0.3 ? Math.ceil(totalDist / 0.25) : 1;
     const stepDelta = delta / steps;
@@ -432,14 +439,16 @@ function moveWithCollision(pos, vx, vz, delta) {
         if (!checkObstacleCollision(nextX, pos.y, pos.z)) {
             pos.x = nextX;
         } else {
-            vx = 0;
+            if (isKnocked) vx = -vx * 0.8;
+            else vx = 0;
         }
 
         const nextZ = pos.z + vz * stepDelta;
         if (!checkObstacleCollision(pos.x, pos.y, nextZ)) {
             pos.z = nextZ;
         } else {
-            vz = 0;
+            if (isKnocked) vz = -vz * 0.8;
+            else vz = 0;
         }
     }
 
@@ -500,6 +509,9 @@ function checkPunchHit() {
 
     for (let id in otherPlayers) {
         const op = otherPlayers[id];
+        // 【無敵ガード】相手が無敵中なら攻撃判定をスキップ！
+        if (op.invincibleTimer > 0) continue;
+
         const targetPos = op.mesh.position;
         const dist = myPos.distanceTo(targetPos);
 
@@ -556,6 +568,9 @@ function checkSpinSweepHit(currentSpinRatio) {
         if (hitTargetsThisSpin.has(id)) continue;
 
         const op = otherPlayers[id];
+        // 【無敵ガード】相手が無敵中なら攻撃判定をスキップ！
+        if (op.invincibleTimer > 0) continue;
+
         const targetPos = op.mesh.position;
         const dist = myPos.distanceTo(targetPos);
 
@@ -592,10 +607,10 @@ function checkSpinSweepHit(currentSpinRatio) {
     prevSpinArmAngle = currentArmAngle;
 }
 
-// --- 【新仕様】ドラゴンダイブ処理 ---
+// ドラゴンダイブ
 let isDiving = false;
 let diveElapsed = 0;
-const DIVE_ARC_TIME = 0.35; // 放物線時間: 0.35秒
+const DIVE_ARC_TIME = 0.35;
 let diveOriginY = 0;
 
 function startDragonDive() {
@@ -605,7 +620,6 @@ function startDragonDive() {
     Controls.consumeDive();
 }
 
-// 着地時の【XYZ全方向8.0m 立体半球衝撃波】発生＆ダメージ判定
 function triggerShockwaveExplosion() {
     const cx = playerGroup.position.x;
     const cy = playerGroup.position.y;
@@ -619,6 +633,9 @@ function triggerShockwaveExplosion() {
 
     for (let id in otherPlayers) {
         const op = otherPlayers[id];
+        // 【無敵ガード】相手が無敵中なら攻撃判定をスキップ！
+        if (op.invincibleTimer > 0) continue;
+
         const targetPos = op.mesh.position;
         const dist3D = myPos.distanceTo(targetPos);
 
@@ -651,7 +668,7 @@ let velocityZ = 0;
 let yVelocity = 0;
 const gravity = -26.0;
 let isOnGround = true;
-let isKnockedBack = false; // 被弾吹っ飛び中フラグ
+let isKnockedBack = false;
 
 let walkTime = 0;
 let currentSwingAngle = 0;
@@ -671,8 +688,21 @@ function animate() {
 
         const input = Controls.getInputs(delta);
 
-        // 【改良1：ダッシュ中の発動完全対応】
-        // ダッシュ中であっても被弾中でなければ即座にドラゴンダイブ発動可能！
+        // 【無敵時間のカウント＆点滅表示処理】
+        if (myInvincibleTimer > 0) {
+            myInvincibleTimer -= delta;
+            if (myInvincibleTimer <= 0) {
+                myInvincibleTimer = 0;
+                playerGroup.visible = true;
+            } else {
+                // 約0.08秒周期で高速点滅
+                playerGroup.visible = (Math.floor(time / 80) % 2 === 0);
+            }
+        } else {
+            playerGroup.visible = true;
+        }
+
+        // ドラゴンダイブ発動
         if (input.diveTriggered && !isDiving && !isKnockedBack && Controls.diveCooldownTimer <= 0) {
             startDragonDive();
         }
@@ -711,12 +741,11 @@ function animate() {
         const baseSpeed = 11.0;
         let currentMaxSpeed = input.isDashing ? baseSpeed * 1.3 : baseSpeed;
 
-        // --- 【改良2 & 3：高度16m・超高速16m/0.35s ＆ 地面接触着地判定】 ---
+        // ドラゴンダイブ滞空物理
         if (isDiving) {
             diveElapsed += delta;
             currentDiveRatio = Math.min(1.0, diveElapsed / DIVE_ARC_TIME);
 
-            // 1. 【移動速度：16.0m ÷ 0.35秒 (約45.71m/s)】
             const diveMoveSpeed = 16.0 / DIVE_ARC_TIME;
             const diveInputMag = Math.hypot(input.inputX, input.inputZ);
 
@@ -731,28 +760,21 @@ function animate() {
                 velocityZ = 0;
             }
 
-            moveWithCollision(playerGroup.position, velocityX, velocityZ, delta);
+            moveWithCollision(playerGroup.position, velocityX, velocityZ, delta, false);
 
-            // 2. 【垂直軌道：高度16.0m跳躍】
             if (diveElapsed <= DIVE_ARC_TIME) {
-                // 跳躍放物線（0〜0.35秒の間）
                 const arcY = Math.sin((diveElapsed / DIVE_ARC_TIME) * Math.PI) * 16.0;
                 playerGroup.position.y = diveOriginY + arcY;
             } else {
-                // 0.35秒経過後：地面に接触するまで高速急降下！
-                yVelocity = -45.0; // 急降下速度
+                yVelocity = -45.0;
                 playerGroup.position.y += yVelocity * delta;
             }
 
-            // 3. 【実際の地面接触判定 ＆ ステージ外への突入落下処理】
             const isOverStage = Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage;
             let targetGroundY = -9999;
 
-            if (isOverStage) {
-                targetGroundY = 0;
-            }
+            if (isOverStage) targetGroundY = 0;
 
-            // 箱の上
             for (let obs of obstacles) {
                 const collideX = playerGroup.position.x + playerRadius > obs.minX && playerGroup.position.x - playerRadius < obs.maxX;
                 const collideZ = playerGroup.position.z + playerRadius > obs.minZ && playerGroup.position.z - playerRadius < obs.maxZ;
@@ -761,9 +783,7 @@ function animate() {
                 }
             }
 
-            // 頂点を通過し、地面・箱の上面に接触した瞬間
             if (diveElapsed > (DIVE_ARC_TIME * 0.5) && playerGroup.position.y <= targetGroundY) {
-                // 【ステージ内】：着地成功 ＆ 衝撃波炸裂！
                 playerGroup.position.y = targetGroundY;
                 isDiving = false;
                 currentDiveRatio = 0;
@@ -773,11 +793,9 @@ function animate() {
                 isOnGround = true;
                 triggerShockwaveExplosion();
             } else if (diveElapsed > DIVE_ARC_TIME && !isOverStage && playerGroup.position.y < 0) {
-                // 【ステージ外】：着地も衝撃波も発生させず、速度を維持したまま奈落へ直滑降！
                 isDiving = false;
                 currentDiveRatio = 0;
                 isOnGround = false;
-                // 下向きの急降下速度を維持したまま落下を継続
                 yVelocity = -35.0;
             }
         } else {
@@ -802,7 +820,7 @@ function animate() {
             }
 
             if (isOnGround) {
-                isKnockedBack = false; // 着地したら被弾状態解除
+                isKnockedBack = false;
                 const groundAccel = 14.0;
                 velocityX += (targetVX - velocityX) * groundAccel * delta;
                 velocityZ += (targetVZ - velocityZ) * groundAccel * delta;
@@ -818,7 +836,7 @@ function animate() {
                 }
             }
 
-            const moved = moveWithCollision(playerGroup.position, velocityX, velocityZ, delta);
+            const moved = moveWithCollision(playerGroup.position, velocityX, velocityZ, delta, isKnockedBack);
             velocityX = moved.vx;
             velocityZ = moved.vz;
 
@@ -874,6 +892,7 @@ function animate() {
             isOnGround = true;
             isDiving = false;
             isKnockedBack = false;
+            myInvincibleTimer = 2.0; // 【新機能】リスポーン時に2秒無敵付与
             Controls.smoothedTargetY = 1.0;
 
             myDamage = 0;
@@ -940,28 +959,23 @@ function animate() {
             currentDiveRatio
         );
 
-        // --- 【改良4：最大到達点8.0mで余韻を残す衝撃波エフェクト更新】 ---
+        // 衝撃波エフェクト更新
         for (let i = activeShockwaves.length - 1; i >= 0; i--) {
             const sw = activeShockwaves[i];
             sw.time += delta;
 
             if (sw.time < sw.expandDuration) {
-                // 第1段階: 0〜0.18秒で半径0mから8.0mへ急速拡大！
                 const progress = sw.time / sw.expandDuration;
                 const currentR = progress * 8.0;
                 sw.group.scale.set(currentR, currentR, currentR);
                 sw.domeMesh.material.opacity = 0.7 * (1.0 - progress * 0.3);
                 sw.ringMesh.material.opacity = 0.95;
             } else if (sw.time < (sw.expandDuration + sw.lingerDuration)) {
-                // 第2段階: 【余韻表示】最大半径8.0mを完全維持したまま、外周リングをくっきり残像表示！
                 sw.group.scale.set(8.0, 8.0, 8.0);
-                const lingerProgress = (sw.time - sw.expandDuration) / sw.lingerDuration; // 0 -> 1
-
-                // ドームは消え、最大到達点の境界リングが鮮明に残って徐々にフェードアウト
+                const lingerProgress = (sw.time - sw.expandDuration) / sw.lingerDuration;
                 sw.domeMesh.material.opacity = Math.max(0, 0.45 * (1.0 - lingerProgress));
                 sw.ringMesh.material.opacity = Math.max(0, 0.95 * (1.0 - lingerProgress));
             } else {
-                // 消滅
                 scene.remove(sw.group);
                 activeShockwaves.splice(i, 1);
             }
@@ -974,9 +988,22 @@ function animate() {
         for (let id in otherPlayers) {
             const op = otherPlayers[id];
 
+            // 【他プレイヤーの無敵タイマー進行＆点滅処理】
+            if (op.invincibleTimer > 0) {
+                op.invincibleTimer -= delta;
+                if (op.invincibleTimer <= 0) {
+                    op.invincibleTimer = 0;
+                    op.mesh.visible = true;
+                } else {
+                    op.mesh.visible = (Math.floor(time / 80) % 2 === 0);
+                }
+            } else {
+                op.mesh.visible = true;
+            }
+
             if (op.isKnockedOut) {
                 const opPos = { x: op.targetX, y: op.targetY, z: op.targetZ };
-                const opMoved = moveWithCollision(opPos, op.kbVX, op.kbVZ, delta);
+                const opMoved = moveWithCollision(opPos, op.kbVX, op.kbVZ, delta, true);
                 op.targetX = opPos.x;
                 op.targetZ = opPos.z;
                 op.kbVX = opMoved.vx;
@@ -1071,7 +1098,8 @@ function animate() {
                 isHoldingSpin: isHoldingSpin,
                 holdingCharge: input.currentHoldingCharge,
                 isDiving: isDiving,
-                diveRatio: currentDiveRatio
+                diveRatio: currentDiveRatio,
+                isInvincible: myInvincibleTimer > 0 // 無敵状態を全員へ送信
             });
             lastSendTime = time;
         }
@@ -1089,4 +1117,5 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ゲーム開始
 animate();
