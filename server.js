@@ -126,7 +126,6 @@ function updateRoomInfo() {
     });
 }
 
-// 【重要新機能】バトル終了時に全プレイヤーの状態を一括リセットする関数
 function resetAllPlayersToFreeMode() {
     currentMode = 'free';
     battleStartTime = 0;
@@ -136,6 +135,7 @@ function resetAllPlayersToFreeMode() {
         p.damage = 0;
         p.isEliminated = false;
         p.joinedMidBattle = false;
+        p.lastFallTime = 0;
     });
 }
 
@@ -149,7 +149,7 @@ function forceEndStockBattle(reason = 'manual') {
         heartDisplay: formatStockToHearts(p.stock)
     }));
 
-    resetAllPlayersToFreeMode(); // 全員一括リセット
+    resetAllPlayersToFreeMode();
 
     io.emit('battleFinished', {
         results: results,
@@ -193,7 +193,7 @@ function checkStockBattleWinner() {
             }
         });
 
-        resetAllPlayersToFreeMode(); // 全員一括リセット
+        resetAllPlayersToFreeMode();
 
         io.emit('battleFinished', {
             results: results,
@@ -230,7 +230,8 @@ io.on('connection', (socket) => {
         isInvincible: false,
         stock: isMidJoin ? 0 : 3,
         isEliminated: isMidJoin,
-        joinedMidBattle: isMidJoin
+        joinedMidBattle: isMidJoin,
+        lastFallTime: 0
     };
 
     socket.emit('init', {
@@ -288,6 +289,7 @@ io.on('connection', (socket) => {
             p.damage = 0;
             p.isEliminated = false;
             p.joinedMidBattle = false;
+            p.lastFallTime = 0;
             p.x = spawns[idx].x;
             p.y = 0;
             p.z = spawns[idx].z;
@@ -323,7 +325,6 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 【重要新機能】衝撃波イベントに送信タイムスタンプを付与（遅延一斉再生の防止用）
     socket.on('spawnShockwave', (data) => {
         socket.broadcast.emit('shockwaveSpawned', {
             x: data.x,
@@ -333,9 +334,16 @@ io.on('connection', (socket) => {
         });
     });
 
+    // 【重要改善】二重落下判定ガード（同一落下イベントを1.5秒間クールダウンしストック二重減少を完全防止）
     const handleFall = (targetId) => {
         const p = players[targetId];
         if (!p) return;
+
+        const now = Date.now();
+        if (p.lastFallTime && (now - p.lastFallTime < 1500)) {
+            return; // 1.5秒以内の重複通知は破棄
+        }
+        p.lastFallTime = now;
 
         p.damage = 0;
         p.x = 0;

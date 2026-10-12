@@ -11,12 +11,13 @@ function checkObstacleCollision(px, py, pz) {
     for (let obs of obstacles) {
         const collideX = px + PLAYER_RADIUS > obs.minX && px - PLAYER_RADIUS < obs.maxX;
         const collideZ = pz + PLAYER_RADIUS > obs.minZ && pz - PLAYER_RADIUS < obs.maxZ;
-        const collideY = py < obs.maxY && (py + PLAYER_HEIGHT) > obs.minY;
+        // 足元がブロック上面より少しでも上にある場合は側面壁として衝突させない
+        const collideY = py < (obs.maxY - 0.05) && (py + PLAYER_HEIGHT) > obs.minY;
 
         if (collideX && collideZ && collideY) return obs;
     }
 
-    // 2. ステージ側面（崖の絶壁）の当たり判定（動的に縮小する halfStage にリアルタイム連動！）
+    // 2. ステージ側面（崖の絶壁）の当たり判定（動的に縮小する halfStage にリアルタイム連動）
     if (py < 0 && py > -25) {
         const inCliffX = px + PLAYER_RADIUS > -halfStage && px - PLAYER_RADIUS < halfStage;
         const inCliffZ = pz + PLAYER_RADIUS > -halfStage && pz - PLAYER_RADIUS < halfStage;
@@ -29,13 +30,15 @@ function unstickFromObstacles(pos) {
     for (let obs of obstacles) {
         const collideX = pos.x + PLAYER_RADIUS > obs.minX && pos.x - PLAYER_RADIUS < obs.maxX;
         const collideZ = pos.z + PLAYER_RADIUS > obs.minZ && pos.z - PLAYER_RADIUS < obs.maxZ;
-        const collideY = pos.y < obs.maxY && (pos.y + PLAYER_HEIGHT) > obs.minY;
+        // 上面に乗っている時は押し出さない
+        const collideY = pos.y < (obs.maxY - 0.05) && (pos.y + PLAYER_HEIGHT) > obs.minY;
 
         if (collideX && collideZ && collideY) {
             const dLeft = Math.abs((pos.x + PLAYER_RADIUS) - obs.minX);
             const dRight = Math.abs(obs.maxX - (pos.x - PLAYER_RADIUS));
             const dBack = Math.abs((pos.z + PLAYER_RADIUS) - obs.minZ);
-            const dFront = Math.abs(obs.maxZ - (pos.z - playerRadius));
+            // 【重要バグ修正】playerRadius を 正しい定数名 PLAYER_RADIUS に修正
+            const dFront = Math.abs(obs.maxZ - (pos.z - PLAYER_RADIUS));
             const minPush = Math.min(dLeft, dRight, dBack, dFront);
 
             if (minPush === dLeft) pos.x = obs.minX - PLAYER_RADIUS - 0.02;

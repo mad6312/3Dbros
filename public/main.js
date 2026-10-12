@@ -165,7 +165,6 @@ socket.on('playerMoved', (data) => {
         p.diveRatio = data.diveRatio || 0;
         p.isInvincible = data.isInvincible || false;
 
-        // 相手が着地した時にノックバック状態を解除（空中吹っ飛び中は維持）
         if (data.isOnGround) {
             p.isKnockedOut = false;
         }
@@ -366,7 +365,6 @@ socket.on('playerKnocked', (data) => {
 
         if (isDiving) isDiving = false;
 
-        // 被弾フラグを立てて吹き飛び初速を設定
         isKnockedBack = true;
         velocityX = data.dirX * data.force;
         velocityZ = data.dirZ * data.force;
@@ -412,7 +410,7 @@ socket.on('playerForceRespawned', (data) => {
         updateNameSpriteDamage(myCharacter.nameObj, 0);
 
         if (!data.isEliminated && !Controls.isEliminated) {
-            myInvincibleTimer = 2.0; // 2秒間の無敵付与
+            myInvincibleTimer = 2.0;
         } else {
             myInvincibleTimer = 0;
         }
@@ -593,7 +591,6 @@ function animate() {
         const delta = Math.min((time - prevTime) / 1000, 0.1);
         prevTime = time;
 
-        // 【最重要修正】自身の無敵タイマー減算および仕様通りの高速点滅処理
         if (myInvincibleTimer > 0) {
             myInvincibleTimer = Math.max(0, myInvincibleTimer - delta);
             if (myInvincibleTimer === 0) {
@@ -614,18 +611,15 @@ function animate() {
 
         const input = Controls.getInputs(delta);
 
-        // 被弾吹っ飛び慣性の判定
         const currentKnockSpeed = Math.hypot(velocityX, velocityZ);
         if (isKnockedBack && currentKnockSpeed < 6.0) {
             isKnockedBack = false;
         }
 
-        // ドラゴンダイブ発動条件
         if (input.diveTriggered && !isDiving && !isKnockedBack && Controls.diveCooldownTimer <= 0) {
             startDragonDive();
         }
 
-        // 攻撃発動
         if (input.attackTriggered && !isPunching && !isSpinAttack && !isDiving) {
             if (input.attackType === 'spin') {
                 Controls.consumeSpinStack();
@@ -641,7 +635,6 @@ function animate() {
             }
         }
 
-        // ガイド表示
         if (input.isHoldingAttack && !isPunching && !isSpinAttack && !isDiving) {
             const predictedReach = 2.4 + input.currentHoldingCharge * 5.6;
 
@@ -665,7 +658,9 @@ function animate() {
         const baseSpeed = 11.0;
         let currentMaxSpeed = input.isDashing ? baseSpeed * 1.3 : baseSpeed;
 
-        // ドラゴンダイブ処理
+        // =======================================================
+        // 【ドラゴンダイブ急降下＆ブロック確実着地処理】
+        // =======================================================
         if (isDiving) {
             diveTimer += delta;
             const totalDiveTime = DIVE_RISE_DURATION + DIVE_FALL_DURATION;
@@ -695,22 +690,29 @@ function animate() {
                 }
             } else {
                 yVelocity = -55.0;
-                playerGroup.position.y += yVelocity * delta;
+                const prevY = playerGroup.position.y;
+                const nextY = prevY + yVelocity * delta;
 
                 const isOverStage = !isStageCompletelyGone && (Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage);
-                let targetGroundY = -9999;
-                if (isOverStage) targetGroundY = 0;
+                let highestGroundY = isOverStage ? 0 : -9999;
 
+                // 【改善】ブロックの上面を通過（スイープ）したかを判定し、確実に上面に着地
                 for (let obs of obstacles) {
-                    const collideX = playerGroup.position.x + PLAYER_RADIUS > obs.minX && playerGroup.position.x - PLAYER_RADIUS < obs.maxX;
-                    const collideZ = playerGroup.position.z + PLAYER_RADIUS > obs.minZ && playerGroup.position.z - PLAYER_RADIUS < obs.maxZ;
-                    if (collideX && collideZ && playerGroup.position.y >= obs.maxY - 0.3) {
-                        if (obs.maxY > targetGroundY) targetGroundY = obs.maxY;
+                    const collideX = (playerGroup.position.x + PLAYER_RADIUS > obs.minX) && (playerGroup.position.x - PLAYER_RADIUS < obs.maxX);
+                    const collideZ = (playerGroup.position.z + PLAYER_RADIUS > obs.minZ) && (playerGroup.position.z - PLAYER_RADIUS < obs.maxZ);
+                    if (collideX && collideZ) {
+                        // 前フレームがブロック上面より上（または上面付近）にあり、降下によって上面を跨ぐ場合
+                        if (prevY >= (obs.maxY - 0.4) && nextY <= obs.maxY) {
+                            if (obs.maxY > highestGroundY) {
+                                highestGroundY = obs.maxY;
+                            }
+                        }
                     }
                 }
 
-                if (playerGroup.position.y <= targetGroundY) {
-                    playerGroup.position.y = targetGroundY;
+                if (nextY <= highestGroundY) {
+                    // 地面またはブロック上面に着地成功
+                    playerGroup.position.y = highestGroundY;
                     isDiving = false;
                     divePhase = 'idle';
                     currentDiveRatio = 0;
@@ -719,12 +721,16 @@ function animate() {
                     yVelocity = 0;
                     isOnGround = true;
                     triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket, Controls.isEliminated);
-                } else if (!isOverStage && playerGroup.position.y < 0) {
+                } else if (!isOverStage && nextY < 0) {
+                    // ステージ外なら着地せず奈落へ直滑降
+                    playerGroup.position.y = nextY;
                     isDiving = false;
                     divePhase = 'idle';
                     currentDiveRatio = 0;
                     isOnGround = false;
                     yVelocity = -40.0;
+                } else {
+                    playerGroup.position.y = nextY;
                 }
             }
         } else {
@@ -789,7 +795,7 @@ function animate() {
                 for (let obs of obstacles) {
                     const collideX = playerGroup.position.x + PLAYER_RADIUS > obs.minX && playerGroup.position.x - PLAYER_RADIUS < obs.maxX;
                     const collideZ = playerGroup.position.z + PLAYER_RADIUS > obs.minZ && playerGroup.position.z - PLAYER_RADIUS < obs.maxZ;
-                    if (collideX && collideZ && playerGroup.position.y >= obs.maxY - 0.2 && nextY <= obs.maxY) {
+                    if (collideX && collideZ && playerGroup.position.y >= (obs.maxY - 0.25) && nextY <= obs.maxY) {
                         if (obs.maxY > groundY) groundY = obs.maxY;
                     }
                 }
@@ -942,7 +948,6 @@ function animate() {
                 }
             }
 
-            // 相手の無敵時間タイマーと点滅
             if (op.invincibleTimer > 0) {
                 op.invincibleTimer -= delta;
                 if (op.invincibleTimer <= 0) {
@@ -1007,7 +1012,8 @@ function animate() {
                     op.isOnGround = false;
                 }
 
-                if (op.targetY < -25 && !op.hasReportedFall) {
+                // 相手が通信途絶している場合のみ、攻撃側が撃墜をサーバーへ通知
+                if (op.targetY < -25 && !op.hasReportedFall && (nowMs - op.lastPacketTime > 600)) {
                     op.hasReportedFall = true;
                     op.isKnockedOut = false;
                     op.kbVX = 0;
@@ -1017,7 +1023,6 @@ function animate() {
                 }
             }
 
-            // 相手キャラクターの位置追従（吹っ飛び中はより素早く追従）
             const distToTarget = Math.hypot(op.targetX - op.mesh.position.x, op.targetZ - op.mesh.position.z);
             if (distToTarget > 25.0) {
                 op.mesh.position.set(op.targetX, op.targetY, op.targetZ);
