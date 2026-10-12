@@ -1,22 +1,38 @@
 // =======================================================
-// モジュール3: ゲームループ・オンライン同期・プレイヤー管理
+// モジュール3: ゲームループ・新スキル・完全描画保証
 // =======================================================
 
 // --- 1. プレイヤーキャラクターの管理 ---
 let myName = 'Player';
 let myDamage = 0;
 let myInvincibleTimer = 0;
+let myStock = null;
 
-const myCharacter = createCharacterMesh(0x3366ff, myName, myDamage);
+const myCharacter = createCharacterMesh(0x3366ff, myName, myDamage, myStock);
 const playerGroup = myCharacter.mesh;
 scene.add(playerGroup);
 
 const otherPlayers = {};
 
-// 操作モジュール初期化
-Controls.init((newName) => {
-    socket.emit('changeName', newName);
-});
+Controls.init(
+    (newName) => {
+        socket.emit('changeName', newName);
+    },
+    () => {
+        if (currentRoomMode === 'stock_battle') {
+            socket.emit('stopStockBattle');
+        } else {
+            socket.emit('startStockBattle');
+        }
+    },
+    () => {
+        handleReturnToFreeMode();
+    }
+);
+
+let currentHostId = null;
+let currentRoomMode = 'free';
+let currentBattleStartTime = 0;
 
 // --- 2. オンライン通信（Socket.io） ---
 const socket = (typeof io !== 'undefined') ? io() : {
@@ -29,7 +45,7 @@ const serverStatus = document.getElementById('server-status');
 let myId = null;
 
 socket.on('connect', () => {
-    myId = socket.id; // 接続と同時に確実にmyIdを取得
+    myId = socket.id;
     if (serverStatus) {
         serverStatus.textContent = 'オンライン接続中';
         serverStatus.classList.add('connected');
@@ -45,29 +61,78 @@ socket.on('disconnect', () => {
 
 socket.on('init', (data) => {
     myId = data.myId;
+    currentHostId = data.hostId;
+    currentRoomMode = data.currentMode;
+    currentBattleStartTime = data.battleStartTime || 0;
+
     const myData = data.players[myId];
     if (myData) {
         playerGroup.position.set(myData.x, myData.y, myData.z);
+        // 【二重防壁】スポーン時のブロックめり込みを即座に安全脱出
+        unstickFromObstacles(playerGroup.position);
+
         if (myCharacter.bodyMesh && myCharacter.bodyMesh.material) {
             myCharacter.bodyMesh.material.color.setHex(myData.color);
         }
         myName = myData.name;
         myDamage = myData.damage || 0;
+        myStock = (currentRoomMode === 'stock_battle') ? myData.stock : null;
+
         updateNameSpriteName(myCharacter.nameObj, myName);
         updateNameSpriteDamage(myCharacter.nameObj, myDamage);
+        updateNameSpriteStock(myCharacter.nameObj, myStock);
+
         const nameInput = document.getElementById('player-name-input');
         if (nameInput) nameInput.value = myName;
+
+        if (myData.isEliminated) {
+            Controls.isEliminated = true;
+            setCharacterGhostMode(myCharacter, true);
+        }
     }
 
     for (let id in data.players) {
         if (id !== myId) addOtherPlayer(data.players[id]);
     }
+    updateHostButtonUI();
 });
+
+socket.on('roomStateUpdate', (data) => {
+    currentHostId = data.hostId;
+    currentRoomMode = data.currentMode;
+    updateHostButtonUI(data.playerCount);
+});
+
+function updateHostButtonUI(playerCount = null) {
+    const hostBtn = document.getElementById('host-battle-btn');
+    if (!hostBtn) return;
+
+    const isHost = (myId && myId === currentHostId);
+    if (!isHost) {
+        hostBtn.style.display = 'none';
+        return;
+    }
+
+    hostBtn.style.display = 'block';
+
+    if (currentRoomMode === 'stock_battle') {
+        hostBtn.textContent = 'ストック制バトルを終了';
+        hostBtn.className = 'stop-mode';
+        hostBtn.disabled = false;
+    } else {
+        hostBtn.textContent = 'ストック制バトルを開始';
+        hostBtn.className = 'start-mode';
+
+        const count = (playerCount !== null) ? playerCount : (Object.keys(otherPlayers).length + 1);
+        hostBtn.disabled = (count < 2);
+    }
+}
 
 socket.on('newPlayer', (playerData) => {
     if (playerData.id !== myId && !otherPlayers[playerData.id]) {
         addOtherPlayer(playerData);
     }
+    updateHostButtonUI();
 });
 
 socket.on('playerRenamed', (data) => {
@@ -79,7 +144,6 @@ socket.on('playerRenamed', (data) => {
     }
 });
 
-// 他プレイヤーのリアルタイム移動受信
 socket.on('playerMoved', (data) => {
     const p = otherPlayers[data.id];
     if (p) {
@@ -98,13 +162,206 @@ socket.on('playerMoved', (data) => {
         p.isDiving = data.isDiving || false;
         p.diveRatio = data.diveRatio || 0;
         p.isInvincible = data.isInvincible || false;
-        p.isKnockedOut = false; // 相手自身が移動しているのでローカル物理追跡を安全に解除
+        p.isKnockedOut = false;
+    }
+});
+
+// =======================================================
+// 【ストック制バトル通信イベント】
+// =======================================================
+
+socket.on('battleStarted', (data) => {
+    currentRoomMode = 'stock_battle';
+    currentBattleStartTime = data.battleStartTime || Date.now();
+    Controls.isEliminated = false;
+    setCharacterGhostMode(myCharacter, false);
+
+    // 古いリザルト画面の強制破棄
+    const resultModal = document.getElementById('battle-result-modal');
+    if (resultModal) resultModal.style.display = 'none';
+
+    Controls.resetAllSkillsAndStamina();
+    myDamage = 0;
+    myStock = 3;
+    myInvincibleTimer = 0;
+
+    updateNameSpriteDamage(myCharacter.nameObj, 0);
+    updateNameSpriteStock(myCharacter.nameObj, 3);
+
+    const myData = data.players[myId];
+    if (myData) {
+        playerGroup.position.set(myData.x, 0, myData.z);
+        // 【二重防壁】開始スポーン時のブロックめり込みを即時回避
+        unstickFromObstacles(playerGroup.position);
+
+        velocityX = 0;
+        velocityZ = 0;
+        yVelocity = 0;
+        isOnGround = true;
+    }
+
+    for (let id in data.players) {
+        if (id !== myId && otherPlayers[id]) {
+            const op = otherPlayers[id];
+            const pData = data.players[id];
+            op.stock = 3;
+            op.damage = 0;
+            op.isEliminated = false;
+            op.mesh.visible = true;
+            op.targetX = pData.x;
+            op.targetY = 0;
+            op.targetZ = pData.z;
+            op.mesh.position.set(pData.x, 0, pData.z);
+            updateNameSpriteDamage(op.nameObj, 0);
+            updateNameSpriteStock(op.nameObj, 3);
+        }
+    }
+
+    const settingsModal = document.getElementById('settings-modal');
+    if (settingsModal) settingsModal.style.display = 'none';
+
+    updateHostButtonUI();
+    startCountdownSequence();
+});
+
+// 【改良】大迫力カウントダウン ＆ 上部アナウンス演出
+function startCountdownSequence() {
+    if (document.activeElement) document.activeElement.blur();
+    Controls.isCountdownActive = true;
+
+    // 画面上部アナウンスバナー表示
+    const announceBanner = document.getElementById('battle-announce-banner');
+    if (announceBanner) announceBanner.style.display = 'block';
+
+    const overlay = document.getElementById('battle-countdown-overlay');
+    if (!overlay) return;
+
+    const playCountNumber = (txt, color) => {
+        overlay.classList.remove('countdown-animate');
+        void overlay.offsetWidth; // リフロー発生でアニメーションを毎回最初から再生
+        overlay.textContent = txt;
+        overlay.style.color = color;
+        overlay.style.display = 'block';
+        overlay.classList.add('countdown-animate');
+    };
+
+    playCountNumber('3', '#ff3344');
+
+    setTimeout(() => {
+        playCountNumber('2', '#ff8800');
+    }, 1000);
+
+    setTimeout(() => {
+        playCountNumber('1', '#ffcc00');
+    }, 2000);
+
+    setTimeout(() => {
+        // GO! と同時に上部バナー消去＆操作解禁！
+        if (announceBanner) announceBanner.style.display = 'none';
+        playCountNumber('GO!', '#00ff88');
+        Controls.isCountdownActive = false;
+    }, 3000);
+
+    setTimeout(() => {
+        overlay.style.display = 'none';
+        overlay.classList.remove('countdown-animate');
+    }, 4000);
+}
+
+socket.on('stockUpdated', (data) => {
+    if (data.id === myId) {
+        myStock = data.stock;
+        updateNameSpriteStock(myCharacter.nameObj, myStock);
+    } else if (otherPlayers[data.id]) {
+        otherPlayers[data.id].stock = data.stock;
+        updateNameSpriteStock(otherPlayers[data.id].nameObj, data.stock);
+    }
+});
+
+socket.on('playerEliminated', (data) => {
+    if (data.id === myId) {
+        Controls.isEliminated = true;
+        setCharacterGhostMode(myCharacter, true);
+    } else if (otherPlayers[data.id]) {
+        const op = otherPlayers[data.id];
+        op.isEliminated = true;
+        op.mesh.visible = false;
+    }
+});
+
+// バトル終了（リザルト画面表示）
+socket.on('battleFinished', (data) => {
+    currentRoomMode = 'free';
+    currentBattleStartTime = 0;
+    updateHostButtonUI();
+
+    resetStageToInitial();
+
+    const resultModal = document.getElementById('battle-result-modal');
+    const headerTitle = document.getElementById('result-modal-header');
+    const winnerTitle = document.getElementById('result-winner-title');
+    const listContainer = document.getElementById('result-list-container');
+
+    if (!resultModal || !listContainer) return;
+
+    listContainer.innerHTML = '';
+
+    if (data.isForceEnd) {
+        headerTitle.textContent = '⏹️ BATTLE ENDED (強制終了)';
+        winnerTitle.textContent = (data.reason === 'low_players') ? '人数が1人以下になったため終了しました' : 'ホストによりバトルが終了されました';
+
+        data.results.forEach(res => {
+            const row = document.createElement('div');
+            row.className = 'result-row';
+            // 【仕様変更】「残ストック：」ラベルを削除し、ハートのみを表示！
+            row.innerHTML = `<span>${res.name}</span><span class="result-heart-txt">${res.heartDisplay}</span>`;
+            listContainer.appendChild(row);
+        });
+    } else {
+        headerTitle.textContent = '🏆 BATTLE RESULT';
+        const topWinner = data.results.find(r => r.rank === 1);
+        winnerTitle.textContent = topWinner ? `Winner: ${topWinner.name}` : '決着！';
+
+        data.results.forEach(res => {
+            const row = document.createElement('div');
+            row.className = `result-row ${res.rank === 1 ? 'rank-1' : ''}`;
+            const rankLabel = res.rank === 1 ? '👑 1位' : `${res.rank}位`;
+            // 【仕様変更】ハートのみ表示
+            const stockLabel = (res.rank === 1 && res.stock > 0) ? `<span class="result-heart-txt">${res.heartDisplay}</span>` : '脱落';
+            row.innerHTML = `<span>${rankLabel}: ${res.name}</span><span>${stockLabel}</span>`;
+            listContainer.appendChild(row);
+        });
+    }
+
+    resultModal.style.display = 'block';
+});
+
+function handleReturnToFreeMode() {
+    myStock = null;
+    Controls.isEliminated = false;
+    setCharacterGhostMode(myCharacter, false);
+    Controls.resetAllSkillsAndStamina();
+    myDamage = 0;
+    updateNameSpriteDamage(myCharacter.nameObj, 0);
+    updateNameSpriteStock(myCharacter.nameObj, null);
+
+    resetStageToInitial();
+    socket.emit('returnToFreeMode');
+}
+
+socket.on('playerReturnedToFree', (data) => {
+    if (otherPlayers[data.id]) {
+        const op = otherPlayers[data.id];
+        op.isEliminated = false;
+        op.mesh.visible = true;
+        updateNameSpriteStock(op.nameObj, null);
+        updateNameSpriteDamage(op.nameObj, 0);
     }
 });
 
 socket.on('playerKnocked', (data) => {
     if (data.targetId === myId) {
-        if (myInvincibleTimer > 0) return;
+        if (myInvincibleTimer > 0 || Controls.isEliminated) return;
 
         myDamage = data.newDamage;
         updateNameSpriteDamage(myCharacter.nameObj, myDamage);
@@ -119,7 +376,7 @@ socket.on('playerKnocked', (data) => {
         isOnGround = false;
     } else if (otherPlayers[data.targetId]) {
         const op = otherPlayers[data.targetId];
-        if (op.invincibleTimer > 0) return;
+        if (op.invincibleTimer > 0 || op.isEliminated) return;
 
         op.damage = data.newDamage;
         updateNameSpriteDamage(op.nameObj, op.damage);
@@ -127,7 +384,7 @@ socket.on('playerKnocked', (data) => {
         op.kbVX = data.dirX * data.force;
         op.kbVZ = data.dirZ * data.force;
         op.kbVY = 8.5 + (op.damage / 80.0) * 4.0;
-        op.isKnockedOut = true; // 相手が非アクティブでも確実に吹き飛ばす
+        op.isKnockedOut = true;
         op.isOnGround = false;
         op.isAttacker = (data.attackerId === myId);
         op.hasReportedSettlement = false;
@@ -142,14 +399,21 @@ socket.on('shockwaveSpawned', (data) => {
 socket.on('playerForceRespawned', (data) => {
     if (data.id === myId) {
         playerGroup.position.set(data.x, 0, data.z);
+        unstickFromObstacles(playerGroup.position);
+
         velocityX = 0;
         velocityZ = 0;
         yVelocity = 0;
         isOnGround = true;
         isKnockedBack = false;
         myDamage = 0;
-        myInvincibleTimer = 2.0;
         updateNameSpriteDamage(myCharacter.nameObj, 0);
+
+        if (!data.isEliminated && !Controls.isEliminated) {
+            myInvincibleTimer = 2.0;
+        } else {
+            myInvincibleTimer = 0;
+        }
     } else if (otherPlayers[data.id]) {
         const op = otherPlayers[data.id];
         op.targetX = data.x;
@@ -157,30 +421,38 @@ socket.on('playerForceRespawned', (data) => {
         op.targetZ = data.z;
         op.mesh.position.set(data.x, 0, data.z);
         op.damage = 0;
-        op.invincibleTimer = 2.0;
         updateNameSpriteDamage(op.nameObj, 0);
         op.kbVX = 0;
         op.kbVY = 0;
         op.kbVZ = 0;
         op.isKnockedOut = false;
         op.isOnGround = true;
+
+        if (!data.isEliminated && !op.isEliminated) {
+            op.invincibleTimer = 2.0;
+        } else {
+            op.invincibleTimer = 0;
+            op.mesh.visible = false;
+        }
     }
 });
 
 socket.on('playerDamageReset', (data) => {
     if (data.id === myId) {
         myDamage = 0;
-        myInvincibleTimer = 2.0;
+        if (!Controls.isEliminated) myInvincibleTimer = 2.0;
         updateNameSpriteDamage(myCharacter.nameObj, 0);
     } else if (otherPlayers[data.id]) {
         otherPlayers[data.id].damage = 0;
-        otherPlayers[data.id].invincibleTimer = 2.0;
+        if (!otherPlayers[data.id].isEliminated) otherPlayers[data.id].invincibleTimer = 2.0;
         updateNameSpriteDamage(otherPlayers[data.id].nameObj, 0);
     }
 });
 
 socket.on('syncSelf', (serverData) => {
     playerGroup.position.set(serverData.x, serverData.y || 0, serverData.z);
+    unstickFromObstacles(playerGroup.position);
+
     myDamage = serverData.damage || 0;
     updateNameSpriteDamage(myCharacter.nameObj, myDamage);
     velocityX = 0;
@@ -202,19 +474,29 @@ socket.on('playerDisconnected', (id) => {
         scene.remove(otherPlayers[id].mesh);
         delete otherPlayers[id];
     }
+    updateHostButtonUI();
 });
 
 function addOtherPlayer(data) {
-    const char = createCharacterMesh(data.color || 0xff3366, data.name || 'Player', data.damage || 0);
+    const isBattle = (currentRoomMode === 'stock_battle');
+    const charStock = isBattle ? (data.stock !== undefined ? data.stock : 3) : null;
+    const char = createCharacterMesh(data.color || 0xff3366, data.name || 'Player', data.damage || 0, charStock);
     char.mesh.position.set(data.x, data.y, data.z);
     char.mesh.rotation.y = data.rotationY || 0;
     scene.add(char.mesh);
+
+    const isElim = !!data.isEliminated;
+    if (isElim) {
+        char.mesh.visible = false;
+    }
 
     otherPlayers[data.id] = {
         mesh: char.mesh,
         charObj: char,
         nameObj: char.nameObj,
         damage: data.damage || 0,
+        stock: data.stock !== undefined ? data.stock : 3,
+        isEliminated: isElim,
         targetX: data.x,
         targetY: data.y,
         targetZ: data.z,
@@ -282,10 +564,14 @@ function animate() {
         const delta = Math.min((time - prevTime) / 1000, 0.1);
         prevTime = time;
 
+        if (currentRoomMode === 'stock_battle' && currentBattleStartTime > 0) {
+            const elapsedSeconds = (Date.now() - currentBattleStartTime) / 1000.0;
+            updateStageShrinkAndPhysics(elapsedSeconds, delta);
+        }
+
         const input = Controls.getInputs(delta);
 
-        // 無敵時間カウント＆点滅
-        if (myInvincibleTimer > 0) {
+        if (myInvincibleTimer > 0 && !Controls.isEliminated) {
             myInvincibleTimer -= delta;
             if (myInvincibleTimer <= 0) {
                 myInvincibleTimer = 0;
@@ -297,7 +583,6 @@ function animate() {
             playerGroup.visible = true;
         }
 
-        // ドラゴンダイブ発動
         if (input.diveTriggered && !isDiving && !isKnockedBack && Controls.diveCooldownTimer <= 0) {
             isDiving = true;
             diveElapsed = 0;
@@ -305,7 +590,6 @@ function animate() {
             Controls.consumeDive();
         }
 
-        // 攻撃発動
         if (input.attackTriggered && !isPunching && !isSpinAttack && !isDiving) {
             if (input.attackType === 'spin') {
                 Controls.consumeSpinStack();
@@ -321,7 +605,6 @@ function animate() {
             }
         }
 
-        // リーチガイド
         if (input.isHoldingAttack && !isPunching && !isSpinAttack && !isDiving) {
             const predictedReach = 2.4 + input.currentHoldingCharge * 5.6;
 
@@ -345,7 +628,6 @@ function animate() {
         const baseSpeed = 11.0;
         let currentMaxSpeed = input.isDashing ? baseSpeed * 1.3 : baseSpeed;
 
-        // ドラゴンダイブ滞空物理
         if (isDiving) {
             diveElapsed += delta;
             currentDiveRatio = Math.min(1.0, diveElapsed / DIVE_ARC_TIME);
@@ -394,7 +676,7 @@ function animate() {
                 velocityZ = 0;
                 yVelocity = 0;
                 isOnGround = true;
-                triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket);
+                triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket, Controls.isEliminated);
             } else if (diveElapsed > DIVE_ARC_TIME && !isOverStage && playerGroup.position.y < 0) {
                 isDiving = false;
                 currentDiveRatio = 0;
@@ -402,7 +684,6 @@ function animate() {
                 yVelocity = -35.0;
             }
         } else {
-            // 通常移動計算
             const inputMagnitude = Math.hypot(input.inputX, input.inputZ);
             const hasInput = inputMagnitude > 0.05;
 
@@ -444,7 +725,7 @@ function animate() {
             velocityZ = moved.vz;
 
             const velVec = { x: velocityX, z: velocityZ };
-            resolvePlayerCollisions(playerGroup.position, otherPlayers, velVec);
+            resolvePlayerCollisions(playerGroup.position, otherPlayers, velVec, Controls.isEliminated);
             velocityX = velVec.x;
             velocityZ = velVec.z;
 
@@ -492,13 +773,14 @@ function animate() {
         // 場外落下
         if (playerGroup.position.y < -25) {
             playerGroup.position.set(0, 0, 0);
+            unstickFromObstacles(playerGroup.position);
+
             velocityX = 0;
             velocityZ = 0;
             yVelocity = 0;
             isOnGround = true;
             isDiving = false;
             isKnockedBack = false;
-            myInvincibleTimer = 2.0;
             Controls.smoothedTargetY = 1.0;
 
             myDamage = 0;
@@ -521,7 +803,7 @@ function animate() {
             currentPunchRatio = Math.max(0, Math.min(1.0, 1.0 - (punchTimer / PUNCH_TOTAL_TIME)));
 
             if (currentPunchRatio >= 0.38 && !punchHitChecked) {
-                checkPunchHit(playerGroup.position, playerGroup.rotation.y, currentChargeLevel, otherPlayers, socket);
+                checkPunchHit(playerGroup.position, playerGroup.rotation.y, currentChargeLevel, otherPlayers, socket, Controls.isEliminated);
                 punchHitChecked = true;
             }
 
@@ -537,7 +819,7 @@ function animate() {
         if (isSpinAttack) {
             spinTimer -= delta;
             currentSpinRatio = Math.max(0, Math.min(1.0, 1.0 - (spinTimer / SPIN_TOTAL_TIME)));
-            checkSpinSweepHit(playerGroup.position, playerGroup.rotation.y, spinChargeLevel, currentSpinRatio, otherPlayers, socket, hitTargetsThisSpin);
+            checkSpinSweepHit(playerGroup.position, playerGroup.rotation.y, spinChargeLevel, currentSpinRatio, otherPlayers, socket, hitTargetsThisSpin, Controls.isEliminated);
 
             if (spinTimer <= 0) {
                 isSpinAttack = false;
@@ -547,7 +829,6 @@ function animate() {
             currentSpinRatio = 0;
         }
 
-        // モーション更新
         const isHoldingSpin = input.isHoldingAttack && input.holdingAttackType === 'spin';
         const activeChargeForMotion = isSpinAttack ? spinChargeLevel : currentChargeLevel;
 
@@ -565,15 +846,19 @@ function animate() {
             currentDiveRatio
         );
 
-        // 衝撃波エフェクト更新
         updateShockwaves(delta);
 
         const targetPos = new THREE.Vector3(playerGroup.position.x, playerGroup.position.y + 1.0, playerGroup.position.z);
         Controls.updateCamera(camera, targetPos, currentSpeed, currentMaxSpeed, delta);
 
-        // --- 他プレイヤー処理（バグ修正：PLAYER_RADIUSを適用＆確実に位置追従） ---
+        // 他プレイヤー処理
         for (let id in otherPlayers) {
             const op = otherPlayers[id];
+
+            if (op.isEliminated) {
+                op.mesh.visible = false;
+                continue;
+            }
 
             if (op.invincibleTimer > 0) {
                 op.invincibleTimer -= delta;
@@ -587,7 +872,6 @@ function animate() {
                 op.mesh.visible = true;
             }
 
-            // 非アクティブ相手が吹き飛ばされている時の物理追跡
             if (op.isKnockedOut) {
                 const opPos = { x: op.targetX, y: op.targetY, z: op.targetZ };
                 const opMoved = moveWithCollision(opPos, op.kbVX, op.kbVZ, delta, true);
@@ -611,7 +895,6 @@ function animate() {
                 let opGroundY = (opOverStage && op.targetY >= -0.15) ? 0 : -9999;
 
                 for (let obs of obstacles) {
-                    // 【タイポ修正】未定義変数 playerRadius を PLAYER_RADIUS に修正！
                     const collideX = op.targetX + PLAYER_RADIUS > obs.minX && op.targetX - PLAYER_RADIUS < obs.maxX;
                     const collideZ = op.targetZ + PLAYER_RADIUS > obs.minZ && op.targetZ - PLAYER_RADIUS < obs.maxZ;
                     if (collideX && collideZ && op.targetY >= obs.maxY - 0.2 && opNextY <= obs.maxY) {
@@ -651,7 +934,6 @@ function animate() {
                 }
             }
 
-            // 【完全同期】相手の描画メッシュをターゲット座標へスムーズかつ確実に追従！
             op.mesh.position.x += (op.targetX - op.mesh.position.x) * 0.25;
             op.mesh.position.y += (op.targetY - op.mesh.position.y) * 0.25;
             op.mesh.position.z += (op.targetZ - op.mesh.position.z) * 0.25;
@@ -672,7 +954,6 @@ function animate() {
             );
         }
 
-        // 自機の最新座標を秒間30回サーバーへ確実に送信
         if (myId && time - lastSendTime > 33) {
             socket.emit('playerMove', {
                 x: playerGroup.position.x,
@@ -701,5 +982,4 @@ function animate() {
     renderer.render(scene, camera);
 }
 
-// ゲーム開始
 animate();

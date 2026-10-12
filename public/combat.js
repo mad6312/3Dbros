@@ -2,13 +2,12 @@
 // モジュール: 物理衝突・壁バウンド・攻撃＆スキル判定
 // =======================================================
 
-// 全モジュール共通の体格定数
 const PLAYER_RADIUS = 0.45;
 const PLAYER_HEIGHT = 1.9;
 
-// --- 1. 障害物＆絶壁コライダー衝突判定 ---
+// --- 1. 障害物＆動的絶壁コライダー衝突判定 ---
 function checkObstacleCollision(px, py, pz) {
-    // 1. 各ボックス障害物との当たり判定
+    // 1. 各ボックス障害物との当たり判定（落下中のブロックも含む）
     for (let obs of obstacles) {
         const collideX = px + PLAYER_RADIUS > obs.minX && px - PLAYER_RADIUS < obs.maxX;
         const collideZ = pz + PLAYER_RADIUS > obs.minZ && pz - PLAYER_RADIUS < obs.maxZ;
@@ -17,7 +16,7 @@ function checkObstacleCollision(px, py, pz) {
         if (collideX && collideZ && collideY) return obs;
     }
 
-    // 2. ステージ側面（崖の絶壁）の当たり判定
+    // 2. ステージ側面（崖の絶壁）の当たり判定（動的に縮小する halfStage にリアルタイム連動！）
     if (py < 0 && py > -25) {
         const inCliffX = px + PLAYER_RADIUS > -halfStage && px - PLAYER_RADIUS < halfStage;
         const inCliffZ = pz + PLAYER_RADIUS > -halfStage && pz - PLAYER_RADIUS < halfStage;
@@ -26,7 +25,6 @@ function checkObstacleCollision(px, py, pz) {
     return null;
 }
 
-// ブロックめり込み脱出救済処理
 function unstickFromObstacles(pos) {
     for (let obs of obstacles) {
         const collideX = pos.x + PLAYER_RADIUS > obs.minX && pos.x - PLAYER_RADIUS < obs.maxX;
@@ -37,7 +35,7 @@ function unstickFromObstacles(pos) {
             const dLeft = Math.abs((pos.x + PLAYER_RADIUS) - obs.minX);
             const dRight = Math.abs(obs.maxX - (pos.x - PLAYER_RADIUS));
             const dBack = Math.abs((pos.z + PLAYER_RADIUS) - obs.minZ);
-            const dFront = Math.abs(obs.maxZ - (pos.z - PLAYER_RADIUS));
+            const dFront = Math.abs(obs.maxZ - (pos.z - playerRadius));
             const minPush = Math.min(dLeft, dRight, dBack, dFront);
 
             if (minPush === dLeft) pos.x = obs.minX - PLAYER_RADIUS - 0.02;
@@ -48,7 +46,6 @@ function unstickFromObstacles(pos) {
     }
 }
 
-// 分割移動＆壁バウンド反発物理
 function moveWithCollision(pos, vx, vz, delta, isKnocked = false) {
     const totalDist = Math.hypot(vx * delta, vz * delta);
     const steps = totalDist > 0.3 ? Math.ceil(totalDist / 0.25) : 1;
@@ -76,13 +73,15 @@ function moveWithCollision(pos, vx, vz, delta, isKnocked = false) {
     return { vx, vz };
 }
 
-// プレイヤー同士の押し合い判定
-function resolvePlayerCollisions(myPos, otherPlayers, velocity) {
-    const minDist = PLAYER_RADIUS * 2; // 0.9m
+function resolvePlayerCollisions(myPos, otherPlayers, velocity, myIsEliminated = false) {
+    if (myIsEliminated) return;
+
+    const minDist = PLAYER_RADIUS * 2;
 
     for (let id in otherPlayers) {
-        // 相手の実座標を取得
         const op = otherPlayers[id];
+        if (op.isEliminated) continue;
+
         const opPosX = (typeof op.targetX === 'number') ? op.targetX : op.mesh.position.x;
         const opPosY = (typeof op.targetY === 'number') ? op.targetY : op.mesh.position.y;
         const opPosZ = (typeof op.targetZ === 'number') ? op.targetZ : op.mesh.position.z;
@@ -111,16 +110,16 @@ function resolvePlayerCollisions(myPos, otherPlayers, velocity) {
 
 // --- 2. 攻撃＆スキル当たり判定ロジック ---
 
-// 通常パンチ / 溜めパンチ判定（【実座標基準で判定】）
-function checkPunchHit(myPos, rotY, currentChargeLevel, otherPlayers, socket) {
+function checkPunchHit(myPos, rotY, currentChargeLevel, otherPlayers, socket, myIsEliminated = false) {
+    if (myIsEliminated) return;
+
     const punchReach = 2.4 + currentChargeLevel * 5.6;
     const forward = new THREE.Vector3(Math.sin(rotY), 0, Math.cos(rotY)).normalize();
 
     for (let id in otherPlayers) {
         const op = otherPlayers[id];
-        if (op.invincibleTimer > 0) continue; // 無敵ガード
+        if (op.invincibleTimer > 0 || op.isEliminated) continue;
 
-        // 描画メッシュではなく、サーバーから届いた最新の実座標で当たり判定を行う！
         const targetPos = new THREE.Vector3(op.targetX, op.targetY, op.targetZ);
         const dist = myPos.distanceTo(targetPos);
 
@@ -129,7 +128,7 @@ function checkPunchHit(myPos, rotY, currentChargeLevel, otherPlayers, socket) {
             const dot = forward.dot(toTarget);
 
             if (dot > 0.35) {
-                const baseDmg = 13 + Math.floor(Math.random() * 5); // 13〜17
+                const baseDmg = 13 + Math.floor(Math.random() * 5);
                 const dmgMultiplier = 1.0 + currentChargeLevel * 0.4;
                 const finalDamage = Math.round(baseDmg * dmgMultiplier);
 
@@ -150,8 +149,9 @@ function checkPunchHit(myPos, rotY, currentChargeLevel, otherPlayers, socket) {
     }
 }
 
-// 回転斬り判定（【実座標基準で判定】）
-function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, otherPlayers, socket, hitTargetsThisSpin) {
+function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, otherPlayers, socket, hitTargetsThisSpin, myIsEliminated = false) {
+    if (myIsEliminated) return;
+
     const spinReach = 2.4 + spinChargeLevel * 5.6;
     const currentTorsoY = 1.8 - currentSpinRatio * (Math.PI * 2);
     const currentArmAngle = rotY + currentTorsoY - Math.PI / 2;
@@ -160,7 +160,7 @@ function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, other
         if (hitTargetsThisSpin.has(id)) continue;
 
         const op = otherPlayers[id];
-        if (op.invincibleTimer > 0) continue;
+        if (op.invincibleTimer > 0 || op.isEliminated) continue;
 
         const targetPos = new THREE.Vector3(op.targetX, op.targetY, op.targetZ);
         const dist = myPos.distanceTo(targetPos);
@@ -175,7 +175,7 @@ function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, other
             if (Math.abs(angleDiff) < 0.65 || currentSpinRatio > 0.85) {
                 hitTargetsThisSpin.add(id);
 
-                const baseDmg = 15 + Math.floor(Math.random() * 5); // 15〜19
+                const baseDmg = 15 + Math.floor(Math.random() * 5);
                 const finalDamage = Math.round(baseDmg * (1.0 + spinChargeLevel * 0.4));
 
                 const targetDamage = op.damage || 0;
@@ -197,8 +197,9 @@ function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, other
     }
 }
 
-// ドラゴンダイブ衝撃波判定（【実座標基準で判定】）
-function triggerShockwaveExplosion(myPos, otherPlayers, socket) {
+function triggerShockwaveExplosion(myPos, otherPlayers, socket, myIsEliminated = false) {
+    if (myIsEliminated) return;
+
     createShockwaveEffect(myPos.x, myPos.y, myPos.z);
     socket.emit('spawnShockwave', { x: myPos.x, y: myPos.y, z: myPos.z });
 
@@ -206,7 +207,7 @@ function triggerShockwaveExplosion(myPos, otherPlayers, socket) {
 
     for (let id in otherPlayers) {
         const op = otherPlayers[id];
-        if (op.invincibleTimer > 0) continue;
+        if (op.invincibleTimer > 0 || op.isEliminated) continue;
 
         const targetPos = new THREE.Vector3(op.targetX, op.targetY, op.targetZ);
         const dist3D = myPos.distanceTo(targetPos);

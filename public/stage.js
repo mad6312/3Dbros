@@ -1,10 +1,10 @@
 // =======================================================
-// モジュール: 3D空間・ステージ・障害物・エフェクト管理
+// モジュール: 3D空間・ステージ・動的縮小・ブロック物理管理
 // =======================================================
 
 // --- 1. シーン・カメラ・レンダラーの設定 ---
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb); // スカイブルーの空
+scene.background = new THREE.Color(0x87ceeb);
 scene.fog = new THREE.Fog(0x87ceeb, 30, 120);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -14,7 +14,6 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
-// ウィンドウリサイズ対応
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -32,59 +31,157 @@ dirLight.shadow.mapSize.width = 2048;
 dirLight.shadow.mapSize.height = 2048;
 scene.add(dirLight);
 
-// --- 3. ステージ（浮島ステージ 60x60） ---
-const stageSize = 60;
-const halfStage = stageSize / 2; // 30m
+// --- 3. ステージ（浮島ステージ初期60x60） ---
+const DEFAULT_STAGE_SIZE = 60.0;
+let stageSize = DEFAULT_STAGE_SIZE;
+let halfStage = stageSize / 2; // 30m
 
-// 地面の足場（上面が y = 0）
-const floorGeo = new THREE.BoxGeometry(stageSize, 2, stageSize);
+const floorGeo = new THREE.BoxGeometry(DEFAULT_STAGE_SIZE, 2, DEFAULT_STAGE_SIZE);
 const floorMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
 const floor = new THREE.Mesh(floorGeo, floorMat);
 floor.position.y = -1;
 floor.receiveShadow = true;
 scene.add(floor);
 
-// 浮島の土台（崖）
-const cliffGeo = new THREE.BoxGeometry(stageSize - 2, 10, stageSize - 2);
+const cliffGeo = new THREE.BoxGeometry(DEFAULT_STAGE_SIZE - 2, 10, DEFAULT_STAGE_SIZE - 2);
 const cliffMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b });
 const cliff = new THREE.Mesh(cliffGeo, cliffMat);
 cliff.position.y = -7;
 scene.add(cliff);
 
-// シード固定乱数による全プレイヤー完全共通の障害物配置
-let seed = 12345;
-function seededRandom() {
-    seed = (seed * 9301 + 49297) % 233280;
-    return seed / 233280;
-}
-
+// 障害物データ管理配列
 const obstacles = [];
+const dynamicBlockObjects = []; // 物理落下シミュレーション用オブジェクト配列
+
 const boxGeo = new THREE.BoxGeometry(2, 2, 2);
 
-for (let i = 0; i < 35; i++) {
-    const boxMat = new THREE.MeshStandardMaterial({
-        color: Math.floor(seededRandom() * 0xffffff)
+// 初期ブロックの生成と配置
+function setupInitialBlocks() {
+    // 既存ブロックの完全破棄
+    dynamicBlockObjects.forEach(b => {
+        if (b.mesh) scene.remove(b.mesh);
     });
-    const box = new THREE.Mesh(boxGeo, boxMat);
-    box.position.x = (seededRandom() - 0.5) * 44;
-    box.position.z = (seededRandom() - 0.5) * 44;
-    box.position.y = 1;
-    box.castShadow = true;
-    box.receiveShadow = true;
-    scene.add(box);
+    dynamicBlockObjects.length = 0;
+    obstacles.length = 0;
 
-    obstacles.push({
-        minX: box.position.x - 1,
-        maxX: box.position.x + 1,
-        minY: 0,
-        maxY: 2,
-        minZ: box.position.z - 1,
-        maxZ: box.position.z + 1
-    });
+    let seed = 12345;
+    function seededRandom() {
+        seed = (seed * 9301 + 49297) % 233280;
+        return seed / 233280;
+    }
+
+    for (let i = 0; i < 35; i++) {
+        const boxMat = new THREE.MeshStandardMaterial({
+            color: Math.floor(seededRandom() * 0xffffff)
+        });
+        const box = new THREE.Mesh(boxGeo, boxMat);
+        const bx = (seededRandom() - 0.5) * 44;
+        const bz = (seededRandom() - 0.5) * 44;
+        const by = 1;
+
+        box.position.set(bx, by, bz);
+        box.castShadow = true;
+        box.receiveShadow = true;
+        scene.add(box);
+
+        const obsData = {
+            minX: bx - 1,
+            maxX: bx + 1,
+            minY: by - 1,
+            maxY: by + 1,
+            minZ: bz - 1,
+            maxZ: bz + 1,
+            blockRef: null
+        };
+        obstacles.push(obsData);
+
+        const blockObj = {
+            mesh: box,
+            x: bx,
+            y: by,
+            z: bz,
+            origX: bx,
+            origY: by,
+            origZ: bz,
+            isFalling: false,
+            vy: 0,
+            isDestroyed: false,
+            obsData: obsData
+        };
+        obsData.blockRef = blockObj;
+        dynamicBlockObjects.push(blockObj);
+    }
+}
+setupInitialBlocks();
+
+// 【新機能】ステージとブロックをバトル開始前の初期状態へ完全復元
+function resetStageToInitial() {
+    stageSize = DEFAULT_STAGE_SIZE;
+    halfStage = stageSize / 2;
+
+    // 床・崖のスケールを元に戻す
+    floor.scale.set(1, 1, 1);
+    floor.visible = true;
+    cliff.scale.set(1, 1, 1);
+    cliff.visible = true;
+
+    // ブロック35個を完全復元
+    setupInitialBlocks();
 }
 
-// --- 4. リーチ予測ガイドの生成 ---
-// パンチ直線ガイド（赤色）
+// 【新機能】ステージ動的縮小 ＆ ブロック物理落下の毎フレーム更新
+function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
+    // バトル開始から180秒経過で縮小開始、さらに180秒（計360秒）で完全消滅
+    if (elapsedSeconds >= 180) {
+        const shrinkProgress = Math.min(1.0, (elapsedSeconds - 180) / 180.0); // 0.0 -> 1.0
+        stageSize = DEFAULT_STAGE_SIZE * (1.0 - shrinkProgress);
+        halfStage = stageSize / 2;
+
+        const scaleRatio = Math.max(0.0001, 1.0 - shrinkProgress);
+        floor.scale.set(scaleRatio, 1, scaleRatio);
+        cliff.scale.set(scaleRatio, 1, scaleRatio);
+
+        if (shrinkProgress >= 1.0) {
+            floor.visible = false;
+            cliff.visible = false;
+        }
+    }
+
+    // ブロックの足場喪失判定（A案：重心基準）＆落下物理
+    const blockGravity = -26.0;
+    for (let b of dynamicBlockObjects) {
+        if (b.isDestroyed) continue;
+
+        // 重心が縮小後のステージ外に出た場合、落下開始
+        if (!b.isFalling) {
+            if (Math.abs(b.x) > halfStage || Math.abs(b.z) > halfStage) {
+                b.isFalling = true;
+            }
+        }
+
+        if (b.isFalling) {
+            b.vy += blockGravity * delta;
+            b.y += b.vy * delta;
+            b.mesh.position.y = b.y;
+
+            // 落下中もAABB当たり判定をリアルタイム更新（プレイヤーが乗れる・ぶつかる）
+            if (b.obsData) {
+                b.obsData.minY = b.y - 1;
+                b.obsData.maxY = b.y + 1;
+            }
+
+            // 奈落の底（Y < -25m）に到達したら消去
+            if (b.y < -25) {
+                b.isDestroyed = true;
+                scene.remove(b.mesh);
+                const obsIdx = obstacles.indexOf(b.obsData);
+                if (obsIdx !== -1) obstacles.splice(obsIdx, 1);
+            }
+        }
+    }
+}
+
+// --- 4. リーチ予測ガイド ---
 const reachGuideGeo = new THREE.BoxGeometry(0.85, 0.03, 1.0);
 reachGuideGeo.translate(0, 0.015, 0.5);
 const reachGuideMat = new THREE.MeshBasicMaterial({
@@ -97,7 +194,6 @@ const reachGuide = new THREE.Mesh(reachGuideGeo, reachGuideMat);
 reachGuide.visible = false;
 scene.add(reachGuide);
 
-// 回転斬り360度円形ガイド（青色）
 const spinGuideGeo = new THREE.CylinderGeometry(1.0, 1.0, 0.03, 36);
 const spinGuideMat = new THREE.MeshBasicMaterial({
     color: 0x00d4ff,

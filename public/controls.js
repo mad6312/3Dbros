@@ -1,5 +1,5 @@
 // =======================================================
-// モジュール2: 操作・UI折りたたみ・キーコンフィグ・スキル管理
+// モジュール2: 操作・UI・キーコンフィグ・リアルタイム視点保証
 // =======================================================
 
 const Controls = {
@@ -22,21 +22,21 @@ const Controls = {
     dashStamina: 100.0,
     isExhausted: false,
 
-    // 攻撃＆溜め管理
     isHoldingAttack: false,
     attackType: 'punch',
     chargeTime: 0,
     chargeLevel: 0,
 
-    // 【回転斬り】スタック＆クールタイム
     spinStacks: 2,
     spinMaxStacks: 2,
     spinCooldownTimer: 0,
     readonlyCooldown: 10.0,
 
-    // 【ドラゴンダイブ】クールタイム
     diveCooldownTimer: 0,
     readonlyDiveCooldown: 20.0,
+
+    isCountdownActive: false,
+    isEliminated: false,
 
     activeKeys: {},
     activeMouseButtons: {},
@@ -57,27 +57,27 @@ const Controls = {
         right: 'KeyD',
         dash: 'ShiftLeft',
         jump: 'Space',
-        punch: 'Mouse0',    // 左クリック
-        spinKey: 'KeyE',     // Eキー
-        diveKey: 'KeyR',     // Rキー
-        lookDrag: 2,         // 右クリックドラッグ
+        punch: 'Mouse0',
+        spinKey: 'KeyE',
+        diveKey: 'KeyR',
+        lookDrag: 2,
 
-        padPunch: 2,         // □
-        padSpin: '6+2',      // L2 ＋ □
-        padDive: 1,          // ○
-        padDash: 0,          // ×
-        padJump: 3,          // △
-        padZoom: 4,          // L1
+        padPunch: 2,
+        padSpin: '6+2',
+        padDive: 1,
+        padDash: 0,
+        padJump: 3,
+        padZoom: 4,
         padMoveStick: 'left',
         padLookStick: 'right'
     },
 
     bindings: {},
 
-    init(onNameChangeCallback) {
+    init(onNameChangeCallback, onHostBattleToggle, onReturnToFree) {
         this.bindings = Object.assign({}, this.defaultBindings);
         this.loadKeyBindings();
-        this.initUI(onNameChangeCallback);
+        this.initUI(onNameChangeCallback, onHostBattleToggle, onReturnToFree);
         this.initEventListeners();
     },
 
@@ -141,7 +141,7 @@ const Controls = {
         }
     },
 
-    initUI(onNameChangeCallback) {
+    initUI(onNameChangeCallback, onHostBattleToggle, onReturnToFree) {
         const toggleInstructionsBtn = document.getElementById('toggle-instructions-btn');
         const instructionsBody = document.getElementById('instructions-body');
         const instructionsHeader = document.getElementById('instructions-header');
@@ -188,15 +188,36 @@ const Controls = {
         const saveNameBtn = document.getElementById('save-name-btn');
         const nameChangedToast = document.getElementById('name-changed-toast');
 
+        const hostBattleBtn = document.getElementById('host-battle-btn');
+        if (hostBattleBtn) {
+            hostBattleBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                hostBattleBtn.blur();
+                if (onHostBattleToggle) onHostBattleToggle();
+            });
+        }
+
+        const resultNextBtn = document.getElementById('result-next-btn');
+        const battleResultModal = document.getElementById('battle-result-modal');
+        if (resultNextBtn) {
+            resultNextBtn.addEventListener('click', () => {
+                resultNextBtn.blur();
+                if (battleResultModal) battleResultModal.style.display = 'none';
+                if (onReturnToFree) onReturnToFree();
+            });
+        }
+
         if (settingsBtn) {
             settingsBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                settingsBtn.blur();
                 if (settingsModal) settingsModal.style.display = 'block';
             });
         }
 
         if (closeSettingsBtn) {
             closeSettingsBtn.addEventListener('click', () => {
+                closeSettingsBtn.blur();
                 if (settingsModal) settingsModal.style.display = 'none';
             });
         }
@@ -204,6 +225,7 @@ const Controls = {
         if (openKeyconfigBtn) {
             openKeyconfigBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                openKeyconfigBtn.blur();
                 this.isKeyConfigOpen = true;
                 this.updateKeyConfigUI();
                 if (keyconfigModal) keyconfigModal.style.display = 'block';
@@ -212,6 +234,7 @@ const Controls = {
 
         if (closeKeyconfigBtn) {
             closeKeyconfigBtn.addEventListener('click', () => {
+                closeKeyconfigBtn.blur();
                 this.cancelCurrentListening();
                 this.isKeyConfigOpen = false;
                 if (keyconfigModal) keyconfigModal.style.display = 'none';
@@ -221,6 +244,7 @@ const Controls = {
         if (resetKeyconfigBtn) {
             resetKeyconfigBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                resetKeyconfigBtn.blur();
                 this.cancelCurrentListening();
                 this.resetToDefaultBindings();
             });
@@ -228,6 +252,7 @@ const Controls = {
 
         if (saveNameBtn) {
             saveNameBtn.addEventListener('click', () => {
+                saveNameBtn.blur();
                 const val = nameInput ? nameInput.value.trim() : '';
                 if (val) {
                     if (onNameChangeCallback) onNameChangeCallback(val);
@@ -242,12 +267,14 @@ const Controls = {
         if (invertYCheckbox) {
             invertYCheckbox.addEventListener('change', (e) => {
                 this.invertY = e.target.checked;
+                invertYCheckbox.blur();
             });
         }
 
         if (antiSicknessCheckbox) {
             antiSicknessCheckbox.addEventListener('change', (e) => {
                 this.antiSickness = e.target.checked;
+                antiSicknessCheckbox.blur();
                 const displayStyle = this.antiSickness ? 'block' : 'none';
                 if (cockpitFrame) cockpitFrame.style.display = displayStyle;
                 if (horizonLine) horizonLine.style.display = displayStyle;
@@ -481,7 +508,7 @@ const Controls = {
             this.activeMouseButtons[e.button] = true;
 
             const lookBtn = Number(this.bindings.lookDrag !== undefined ? this.bindings.lookDrag : 2);
-            // 右ドラッグまたは設定されたボタンドラッグで確実に視点操作開始
+            // カウントダウン中であっても右ドラッグ視点移動は完全に即時有効！
             if (!this.isKeyConfigOpen && (e.button === lookBtn || e.button === 2)) {
                 this.isDragging = true;
                 this.previousMousePosition = { x: e.clientX, y: e.clientY };
@@ -553,6 +580,15 @@ const Controls = {
         this.diveCooldownTimer = this.readonlyDiveCooldown;
     },
 
+    resetAllSkillsAndStamina() {
+        this.spinStacks = 2;
+        this.spinCooldownTimer = 0;
+        this.diveCooldownTimer = 0;
+        this.dashStamina = 100.0;
+        this.isExhausted = false;
+        this.cancelPunchCharge();
+    },
+
     isKeyOrCombinationPressed(bindingVal) {
         if (bindingVal === undefined || bindingVal === null) return false;
 
@@ -593,6 +629,7 @@ const Controls = {
     },
 
     getInputs(delta) {
+        // --- 1. クールタイム進行 ---
         if (this.spinStacks < this.spinMaxStacks) {
             this.spinCooldownTimer -= delta;
             if (this.spinCooldownTimer <= 0) {
@@ -646,19 +683,62 @@ const Controls = {
             }
         }
 
+        // --- 2. ゲームパッドの視点操作（カウントダウン中・脱落中も最優先で受付） ---
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
+
+        if (gp) {
+            const lookAxes = this.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
+            const isZoomHolding = this.isPadButtonPressed(gp, this.bindings.padZoom);
+            const stickRX = this.applyDeadzone(lookAxes[0]);
+            const stickRY = this.applyDeadzone(lookAxes[1]);
+
+            if (isZoomHolding) {
+                if (stickRY !== 0) {
+                    this.cameraDistance += stickRY * 12.0 * delta;
+                    this.cameraDistance = Math.max(this.minDistance, Math.min(this.maxDistance, this.cameraDistance));
+                }
+            } else {
+                if (stickRX !== 0) {
+                    this.targetYaw -= stickRX * 2.8 * delta;
+                    this.angularSpeed += Math.abs(stickRX) * 2.5;
+                }
+                if (stickRY !== 0) {
+                    const pitchFactor = this.invertY ? -1 : 1;
+                    this.targetPitch -= stickRY * 2.5 * delta * pitchFactor;
+                    this.targetPitch = Math.max(-0.2, Math.min(Math.PI / 2.5, this.targetPitch));
+                    this.angularSpeed += Math.abs(stickRY) * 2.0;
+                }
+            }
+        }
+
+        // --- 3. 【最重要修正】カメラスムージング（角度更新）は絶対にスキップせず最優先で毎フレーム実行！ ---
+        if (this.antiSickness) {
+            const smoothFactor = Math.min(1.0, 14.0 * delta);
+            this.currentYaw += (this.targetYaw - this.currentYaw) * smoothFactor;
+            this.currentPitch += (this.targetPitch - this.currentPitch) * smoothFactor;
+        } else {
+            this.currentYaw = this.targetYaw;
+            this.currentPitch = this.targetPitch;
+        }
+
+        // キーコンフィグ中
         if (this.isKeyConfigOpen) {
             this.cancelPunchCharge();
             return {
-                inputX: 0,
-                inputZ: 0,
-                jump: false,
-                isDashing: false,
-                attackTriggered: false,
-                attackType: 'punch',
-                chargeLevel: 0,
-                isHoldingAttack: false,
-                currentHoldingCharge: 0,
-                diveTriggered: false
+                inputX: 0, inputZ: 0, jump: false, isDashing: false,
+                attackTriggered: false, attackType: 'punch', chargeLevel: 0,
+                isHoldingAttack: false, currentHoldingCharge: 0, diveTriggered: false
+            };
+        }
+
+        // 【カウントダウン中】：キャラ操作のみロック（視点はリアルタイム更新済み）
+        if (this.isCountdownActive) {
+            this.cancelPunchCharge();
+            return {
+                inputX: 0, inputZ: 0, jump: false, isDashing: false,
+                attackTriggered: false, attackType: 'punch', chargeLevel: 0,
+                isHoldingAttack: false, currentHoldingCharge: 0, diveTriggered: false
             };
         }
 
@@ -681,40 +761,12 @@ const Controls = {
         let isPadSpinPressed = false;
         let isPadDivePressed = false;
 
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
-
         if (gp) {
             const moveAxes = this.bindings.padMoveStick === 'left' ? [gp.axes[0], gp.axes[1]] : [gp.axes[2], gp.axes[3]];
-            const lookAxes = this.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
-
-            const isZoomHolding = this.isPadButtonPressed(gp, this.bindings.padZoom);
-
             const stickLX = this.applyDeadzone(moveAxes[0]);
             const stickLY = this.applyDeadzone(moveAxes[1]);
             if (stickLX !== 0) inputX = stickLX;
             if (stickLY !== 0) inputZ = -stickLY;
-
-            const stickRX = this.applyDeadzone(lookAxes[0]);
-            const stickRY = this.applyDeadzone(lookAxes[1]);
-
-            if (isZoomHolding) {
-                if (stickRY !== 0) {
-                    this.cameraDistance += stickRY * 12.0 * delta;
-                    this.cameraDistance = Math.max(this.minDistance, Math.min(this.maxDistance, this.cameraDistance));
-                }
-            } else {
-                if (stickRX !== 0) {
-                    this.targetYaw -= stickRX * 2.8 * delta;
-                    this.angularSpeed += Math.abs(stickRX) * 2.5;
-                }
-                if (stickRY !== 0) {
-                    const pitchFactor = this.invertY ? -1 : 1;
-                    this.targetPitch -= stickRY * 2.5 * delta * pitchFactor;
-                    this.targetPitch = Math.max(-0.2, Math.min(Math.PI / 2.5, this.targetPitch));
-                    this.angularSpeed += Math.abs(stickRY) * 2.0;
-                }
-            }
 
             if (this.isPadButtonPressed(gp, this.bindings.padJump)) jump = true;
             if (this.isPadButtonPressed(gp, this.bindings.padDash)) isDashRequested = true;
@@ -745,6 +797,16 @@ const Controls = {
             dashText.textContent = `${Math.round(this.dashStamina)}%`;
             if (this.isExhausted) dashBarFill.classList.add('exhausted');
             else dashBarFill.classList.remove('exhausted');
+        }
+
+        // 【脱落者】：移動は可能だが攻撃はロック（視点はリアルタイム更新済み）
+        if (this.isEliminated) {
+            this.cancelPunchCharge();
+            return {
+                inputX, inputZ, jump, isDashing,
+                attackTriggered: false, attackType: 'punch', chargeLevel: 0,
+                isHoldingAttack: false, currentHoldingCharge: 0, diveTriggered: false
+            };
         }
 
         let diveTriggered = false;
@@ -797,15 +859,6 @@ const Controls = {
             }
         }
 
-        if (this.antiSickness) {
-            const smoothFactor = Math.min(1.0, 14.0 * delta);
-            this.currentYaw += (this.targetYaw - this.currentYaw) * smoothFactor;
-            this.currentPitch += (this.targetPitch - this.currentPitch) * smoothFactor;
-        } else {
-            this.currentYaw = this.targetYaw;
-            this.currentPitch = this.targetPitch;
-        }
-
         return {
             inputX,
             inputZ,
@@ -821,7 +874,6 @@ const Controls = {
         };
     },
 
-    // 【安全保証】引数が未定義でもデフォルト値で安全に動作し、視点固定を根絶
     updateCamera(camera, realPlayerPos, currentSpeed = 0, maxSpeed = 11.0, delta = 0.016) {
         if (!camera) return;
 

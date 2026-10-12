@@ -17,47 +17,205 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// 全プレイヤーデータ
 const players = {};
+let hostId = null;
 
-// 豊富なカラーパレット（最大10色）
+let currentMode = 'free';
+let battleStartTime = 0;
+let eliminatedOrder = [];
+
 const playerColors = [
-    0x3366ff, // ブルー
-    0xff3344, // レッド
-    0x33cc66, // グリーン
-    0xff9900, // オレンジ
-    0x9933ff, // パープル
-    0x00d4ff, // シアン
-    0xffcc00, // イエロー
-    0xff66cc, // ピンク
-    0x00ffaa, // ミント
-    0xaaaaaa  // シルバー
+    0x3366ff, 0xff3344, 0x33cc66, 0xff9900,
+    0x9933ff, 0x00cccc, 0xffcc00, 0xff66cc,
+    0x00ffaa, 0xaaaaaa
 ];
 
-// 【新機能】現在誰も使っていないカラーを自動選定する関数
 function getAvailableColor() {
     const usedColors = Object.values(players).map(p => p.color);
-    // 未使用のカラーを探す
     const available = playerColors.filter(c => !usedColors.includes(c));
     if (available.length > 0) {
         return available[Math.floor(Math.random() * available.length)];
     }
-    // 全色使われている場合はランダム
     return playerColors[Math.floor(Math.random() * playerColors.length)];
+}
+
+// 【重要修正】クライアント側(stage.js)と完全に同一順序（色・X・Zの3回）で乱数を回し、ブロック座標を完全一致させる！
+const obstacleBoxes = [];
+let seed = 12345;
+function seededRandom() {
+    seed = (seed * 9301 + 49297) % 233280;
+    return seed / 233280;
+}
+for (let i = 0; i < 35; i++) {
+    seededRandom(); // 1回目: 色決定用（クライアント側と同期）
+    const bx = (seededRandom() - 0.5) * 44; // 2回目: X座標
+    const bz = (seededRandom() - 0.5) * 44; // 3回目: Z座標
+    obstacleBoxes.push({
+        minX: bx - 1.0,
+        maxX: bx + 1.0,
+        minZ: bz - 1.0,
+        maxZ: bz + 1.0
+    });
+}
+
+// ブロックとの重複判定（プレイヤー半径0.45m + 余裕0.2m）
+function isCollidingWithBlocks(x, z) {
+    const r = 0.65;
+    for (let b of obstacleBoxes) {
+        if (x + r > b.minX && x - r < b.maxX && z + r > b.minZ && z - r < b.maxZ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ルーム入室時の安全スポーン位置
+function generateSafeRoomSpawn() {
+    for (let attempts = 0; attempts < 500; attempts++) {
+        const x = (Math.random() - 0.5) * 20;
+        const z = (Math.random() - 0.5) * 20;
+        if (!isCollidingWithBlocks(x, z)) {
+            return { x, y: 0, z };
+        }
+    }
+    return { x: 0, y: 0, z: 0 };
+}
+
+// ストック制バトル開始時の安全スポーン位置（15m以内、他プレイヤー回避、ブロック回避）
+function generateBattleSpawnPositions(count) {
+    const positions = [];
+    const minDistance = 3.5;
+
+    for (let i = 0; i < count; i++) {
+        let placed = false;
+        for (let attempts = 0; attempts < 800; attempts++) {
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 3.0 + Math.random() * 11.5; // 3m〜14.5m
+            const x = Math.sin(angle) * radius;
+            const z = Math.cos(angle) * radius;
+
+            if (isCollidingWithBlocks(x, z)) continue;
+
+            const tooClose = positions.some(p => Math.hypot(p.x - x, p.z - z) < minDistance);
+            if (!tooClose) {
+                positions.push({ x, y: 0, z });
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            // 万が一見つからない場合はブロックのない外周の確定安全位置に配置
+            positions.push({ x: (i * 3) - 6, y: 0, z: (i * 3) - 6 });
+        }
+    }
+    return positions;
+}
+
+// ハート形式文字列への変換
+function formatStockToHearts(stock) {
+    if (stock >= 3) return '♥♥♥';
+    if (stock === 2) return '♥♥♡';
+    if (stock === 1) return '♥♡♡';
+    return '♡♡♡';
+}
+
+function updateRoomInfo() {
+    const ids = Object.keys(players);
+    if (!hostId || !players[hostId]) {
+        hostId = ids.length > 0 ? ids[0] : null;
+    }
+
+    io.emit('roomStateUpdate', {
+        hostId: hostId,
+        playerCount: ids.length,
+        currentMode: currentMode
+    });
+}
+
+// バトル強制終了処理
+function forceEndStockBattle(reason = 'manual') {
+    if (currentMode !== 'stock_battle') return;
+
+    currentMode = 'free';
+    battleStartTime = 0;
+
+    const results = Object.values(players).map(p => ({
+        id: p.id,
+        name: p.name,
+        stock: p.stock,
+        heartDisplay: formatStockToHearts(p.stock)
+    }));
+
+    io.emit('battleFinished', {
+        results: results,
+        isForceEnd: true,
+        reason: reason
+    });
+    updateRoomInfo();
+}
+
+// 生存者判定
+function checkStockBattleWinner() {
+    if (currentMode !== 'stock_battle') return;
+
+    const participants = Object.values(players).filter(p => !p.joinedMidBattle);
+    const alivePlayers = participants.filter(p => p.stock > 0);
+
+    if (alivePlayers.length <= 1 && participants.length >= 2) {
+        currentMode = 'free';
+        battleStartTime = 0;
+        const winner = alivePlayers[0] || null;
+
+        const results = [];
+        if (winner) {
+            results.push({
+                rank: 1,
+                id: winner.id,
+                name: winner.name,
+                stock: winner.stock,
+                heartDisplay: formatStockToHearts(winner.stock),
+                isWinner: true
+            });
+        }
+
+        eliminatedOrder.reverse().forEach((elId) => {
+            if (players[elId] && elId !== (winner ? winner.id : null)) {
+                results.push({
+                    rank: results.length + 1,
+                    id: elId,
+                    name: players[elId].name,
+                    stock: 0,
+                    heartDisplay: '♡♡♡',
+                    isWinner: false
+                });
+            }
+        });
+
+        io.emit('battleFinished', {
+            results: results,
+            isForceEnd: false
+        });
+        updateRoomInfo();
+    }
 }
 
 io.on('connection', (socket) => {
     console.log(`[接続] プレイヤーが入室: ${socket.id}`);
 
-    // 重複しないカラーを自動割り当て
     const assignedColor = getAvailableColor();
     const defaultName = `Player_${socket.id.substring(0, 4)}`;
+    const isMidJoin = (currentMode === 'stock_battle');
+
+    // ブロックと重ならない安全スポーン位置を決定
+    const initSpawn = generateSafeRoomSpawn();
 
     players[socket.id] = {
         id: socket.id,
         name: defaultName,
-        x: (Math.random() - 0.5) * 10,
-        y: 0,
-        z: (Math.random() - 0.5) * 10,
+        x: initSpawn.x,
+        y: initSpawn.y,
+        z: initSpawn.z,
         rotationY: 0,
         color: assignedColor,
         swingAngle: 0,
@@ -68,15 +226,22 @@ io.on('connection', (socket) => {
         diveRatio: 0,
         armScaleZ: 1.0,
         damage: 0,
-        isInvincible: false
+        isInvincible: false,
+        stock: isMidJoin ? 0 : 3,
+        isEliminated: isMidJoin,
+        joinedMidBattle: isMidJoin
     };
 
     socket.emit('init', {
         myId: socket.id,
-        players: players
+        players: players,
+        hostId: hostId,
+        currentMode: currentMode,
+        battleStartTime: battleStartTime
     });
 
     socket.broadcast.emit('newPlayer', players[socket.id]);
+    updateRoomInfo();
 
     socket.on('changeName', (newName) => {
         if (players[socket.id] && typeof newName === 'string') {
@@ -106,58 +271,109 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 攻撃命中通知
-    socket.on('punchHit', (data) => {
-        if (players[data.targetId]) {
-            players[data.targetId].damage += data.damageDealt;
+    socket.on('startStockBattle', () => {
+        if (socket.id !== hostId || Object.keys(players).length < 2) return;
 
-            io.emit('playerKnocked', {
-                targetId: data.targetId,
-                attackerId: socket.id,
-                dirX: data.dirX,
-                dirZ: data.dirZ,
-                force: data.force,
-                newDamage: players[data.targetId].damage
-            });
-        }
+        currentMode = 'stock_battle';
+        battleStartTime = Date.now();
+        eliminatedOrder = [];
+
+        const ids = Object.keys(players);
+        const spawns = generateBattleSpawnPositions(ids.length);
+
+        ids.forEach((id, idx) => {
+            const p = players[id];
+            p.stock = 3;
+            p.damage = 0;
+            p.isEliminated = false;
+            p.joinedMidBattle = false;
+            p.x = spawns[idx].x;
+            p.y = 0;
+            p.z = spawns[idx].z;
+        });
+
+        io.emit('battleStarted', {
+            players: players,
+            countdown: 3,
+            battleStartTime: battleStartTime
+        });
+        updateRoomInfo();
     });
 
-    socket.on('spawnShockwave', (data) => {
-        socket.broadcast.emit('shockwaveSpawned', {
-            x: data.x,
-            y: data.y,
-            z: data.z
+    socket.on('stopStockBattle', () => {
+        if (socket.id !== hostId || currentMode !== 'stock_battle') return;
+        forceEndStockBattle('manual');
+    });
+
+    socket.on('punchHit', (data) => {
+        const target = players[data.targetId];
+        const attacker = players[socket.id];
+        if (!target || !attacker || target.isEliminated || attacker.isEliminated) return;
+
+        target.damage += data.damageDealt;
+
+        io.emit('playerKnocked', {
+            targetId: data.targetId,
+            attackerId: socket.id,
+            dirX: data.dirX,
+            dirZ: data.dirZ,
+            force: data.force,
+            newDamage: target.damage
         });
     });
 
-    // リスポーン（無敵時間フラグ付与）
-    socket.on('playerRespawn', () => {
-        if (players[socket.id]) {
-            players[socket.id].damage = 0;
-            players[socket.id].x = 0;
-            players[socket.id].y = 0;
-            players[socket.id].z = 0;
-            players[socket.id].isInvincible = true;
-            io.emit('playerDamageReset', { id: socket.id, damage: 0 });
-        }
+    socket.on('spawnShockwave', (data) => {
+        socket.broadcast.emit('shockwaveSpawned', { x: data.x, y: data.y, z: data.z });
     });
 
-    // 相手が裏画面でも場外に落ちた際の強制リスポーン
+    const handleFall = (targetId) => {
+        const p = players[targetId];
+        if (!p) return;
+
+        p.damage = 0;
+        p.x = 0;
+        p.y = 0;
+        p.z = 0;
+
+        if (currentMode === 'stock_battle' && !p.isEliminated) {
+            p.stock = Math.max(0, p.stock - 1);
+
+            if (p.stock === 0) {
+                p.isEliminated = true;
+                eliminatedOrder.push(p.id);
+                io.emit('playerEliminated', { id: p.id });
+            }
+
+            io.emit('stockUpdated', { id: p.id, stock: p.stock });
+            checkStockBattleWinner();
+        }
+
+        io.emit('playerForceRespawned', {
+            id: p.id,
+            x: 0,
+            y: 0,
+            z: 0,
+            damage: 0,
+            isEliminated: p.isEliminated
+        });
+    };
+
+    socket.on('playerRespawn', () => {
+        handleFall(socket.id);
+    });
+
     socket.on('targetFellOut', (data) => {
-        const tid = data.targetId;
-        if (players[tid]) {
-            players[tid].damage = 0;
-            players[tid].x = 0;
-            players[tid].y = 0;
-            players[tid].z = 0;
-            players[tid].isInvincible = true;
-            io.emit('playerForceRespawned', {
-                id: tid,
-                x: 0,
-                y: 0,
-                z: 0,
-                damage: 0
-            });
+        handleFall(data.targetId);
+    });
+
+    socket.on('returnToFreeMode', () => {
+        const p = players[socket.id];
+        if (p) {
+            p.stock = 3;
+            p.damage = 0;
+            p.isEliminated = false;
+            p.joinedMidBattle = false;
+            io.emit('playerReturnedToFree', { id: socket.id });
         }
     });
 
@@ -178,12 +394,24 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log(`[切断] プレイヤーが退出: ${socket.id}`);
         delete players[socket.id];
+
+        if (socket.id === hostId) {
+            hostId = null;
+        }
+
         io.emit('playerDisconnected', socket.id);
+        updateRoomInfo();
+
+        if (currentMode === 'stock_battle' && Object.keys(players).length <= 1) {
+            forceEndStockBattle('low_players');
+        } else {
+            checkStockBattleWinner();
+        }
     });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`=========================================`);
-    console.log(`マルチプレイサーバー稼働中: http://localhost:${PORT}`);
+    console.log(`3Dbros サーバー稼働中: http://localhost:${PORT}`);
     console.log(`=========================================`);
 });

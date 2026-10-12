@@ -1,8 +1,7 @@
 // =======================================================
-// モジュール1: キャラクター・ダメージ表示・ダイブモーション
+// モジュール1: キャラクター・ハート残ストック・ゴースト化
 // =======================================================
 
-// 全ブラウザ対応の安全な角丸四角形描画関数（roundRect未対応ブラウザでの即死を防止）
 function drawSafeRoundRect(ctx, x, y, width, height, radius) {
     if (ctx.roundRect) {
         ctx.roundRect(x, y, width, height, radius);
@@ -21,50 +20,82 @@ function drawSafeRoundRect(ctx, x, y, width, height, radius) {
     }
 }
 
-// 頭上のネームタグ＆蓄積ダメージスプライトの作成
-function createNameSprite(nameText, damage = 0) {
+// 頭上のネーム・ダメージ・残ストック表示スプライト
+function createNameSprite(nameText, damage = 0, stock = null) {
     const canvas = document.createElement('canvas');
     canvas.width = 256;
-    canvas.height = 100;
+    canvas.height = 120;
     const ctx = canvas.getContext('2d');
 
     const texture = new THREE.CanvasTexture(canvas);
     const spriteMat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
     const sprite = new THREE.Sprite(spriteMat);
-    sprite.scale.set(2.4, 0.94, 1);
-    sprite.position.y = 2.4;
+    sprite.scale.set(2.4, 1.12, 1);
+    sprite.position.y = 2.45;
 
-    const nameObj = { sprite, texture, canvas, ctx, currentName: nameText, currentDamage: damage };
+    const nameObj = {
+        sprite,
+        texture,
+        canvas,
+        ctx,
+        currentName: nameText,
+        currentDamage: damage,
+        currentStock: (stock !== null && stock !== undefined) ? Number(stock) : null
+    };
     renderNameSprite(nameObj);
     return nameObj;
 }
 
+// ネームタグ描画
 function renderNameSprite(nameObj) {
     const ctx = nameObj.ctx;
-    ctx.clearRect(0, 0, 256, 100);
+    ctx.clearRect(0, 0, 256, 120);
 
-    // 背景プレート（安全な互換関数で描画）
-    ctx.fillStyle = 'rgba(10, 15, 25, 0.75)';
+    const isBattle = (nameObj.currentStock !== null && nameObj.currentStock !== undefined);
+
+    // 背景プレート
+    ctx.fillStyle = 'rgba(10, 15, 25, 0.78)';
     ctx.beginPath();
-    drawSafeRoundRect(ctx, 8, 6, 240, 88, 12);
+    drawSafeRoundRect(ctx, 8, 6, 240, 108, 12);
     ctx.fill();
 
+    let nameY = 40;
+    let dmgY = 82;
+
+    // ストック制バトル中：最上段にハートマークを表示
+    if (isBattle) {
+        let heartStr = '♡♡♡';
+        const st = Number(nameObj.currentStock);
+        if (st >= 3) heartStr = '♥♥♥';
+        else if (st === 2) heartStr = '♥♥♡';
+        else if (st === 1) heartStr = '♥♡♡';
+
+        ctx.font = 'bold 22px sans-serif';
+        ctx.fillStyle = '#ff3366';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(heartStr, 128, 25);
+
+        nameY = 55;
+        dmgY = 92;
+    }
+
     // プレイヤーネーム
-    ctx.font = 'bold 24px sans-serif';
+    ctx.font = 'bold 22px sans-serif';
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(nameObj.currentName, 128, 32);
+    ctx.fillText(nameObj.currentName, 128, nameY);
 
-    // 蓄積ダメージ（色変化）
+    // 蓄積ダメージ（%）
     const dmg = Math.round(nameObj.currentDamage);
     let dmgColor = '#ffffff';
     if (dmg >= 100) dmgColor = '#ff3344';
     else if (dmg >= 50) dmgColor = '#ffcc00';
 
-    ctx.font = 'bold 30px sans-serif';
+    ctx.font = 'bold 26px sans-serif';
     ctx.fillStyle = dmgColor;
-    ctx.fillText(`${dmg}%`, 128, 68);
+    ctx.fillText(`${dmg}%`, 128, dmgY);
 
     nameObj.texture.needsUpdate = true;
 }
@@ -79,7 +110,15 @@ function updateNameSpriteDamage(nameObj, newDamage) {
     renderNameSprite(nameObj);
 }
 
-function createCharacterMesh(colorHex, nameText, damage = 0) {
+// 【改良】残ストックの確実な更新
+function updateNameSpriteStock(nameObj, newStock) {
+    if (!nameObj) return;
+    nameObj.currentStock = (newStock !== null && newStock !== undefined) ? Number(newStock) : null;
+    renderNameSprite(nameObj);
+}
+
+// キャラクターモデル作成
+function createCharacterMesh(colorHex, nameText, damage = 0, stock = null) {
     const group = new THREE.Group();
 
     const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex });
@@ -123,7 +162,7 @@ function createCharacterMesh(colorHex, nameText, damage = 0) {
     leftArmPivot.add(leftArm);
     torsoGroup.add(leftArmPivot);
 
-    // 右腕（基準長さ1.0m、肩端が原点）
+    // 右腕
     const rightArmGeo = new THREE.BoxGeometry(0.2, 1.0, 0.2);
     rightArmGeo.translate(0, -0.5, 0);
 
@@ -152,9 +191,10 @@ function createCharacterMesh(colorHex, nameText, damage = 0) {
     rightLegPivot.add(rightLeg);
     group.add(rightLegPivot);
 
-    // ネーム＆ダメージ表示
-    const nameObj = createNameSprite(nameText, damage);
+    const nameObj = createNameSprite(nameText, damage, stock);
     group.add(nameObj.sprite);
+
+    const allMeshes = [body, head, eyes, leftArm, rightArm, leftLeg, rightLeg];
 
     return {
         mesh: group,
@@ -165,15 +205,31 @@ function createCharacterMesh(colorHex, nameText, damage = 0) {
         rightArm,
         leftLegPivot,
         rightLegPivot,
-        nameObj
+        nameObj,
+        allMeshes
     };
 }
 
-// キャラクターモーション更新
+// 脱落プレイヤーの半透明ゴースト化
+function setCharacterGhostMode(char, isGhost) {
+    if (!char || !char.allMeshes) return;
+
+    char.allMeshes.forEach(mesh => {
+        if (mesh && mesh.material) {
+            mesh.material.transparent = isGhost;
+            mesh.material.opacity = isGhost ? 0.35 : 1.0;
+        }
+    });
+
+    if (char.nameObj && char.nameObj.sprite && char.nameObj.sprite.material) {
+        char.nameObj.sprite.material.opacity = isGhost ? 0.4 : 1.0;
+    }
+}
+
+// モーション更新
 function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, chargeLevel = 0, isSpinAttack = false, spinRatio = 0, isHoldingSpin = false, holdingCharge = 0, isDiving = false, diveRatio = 0) {
     if (!char || !char.torsoGroup) return;
 
-    // --- 1. ドラゴンダイブ中 ---
     if (isDiving) {
         char.rightArm.scale.set(1.1, 0.65, 1.1);
 
@@ -207,7 +263,6 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
         char.torsoGroup.rotation.x = 0;
     }
 
-    // 基本脚モーション
     if (isOnGround) {
         char.leftLegPivot.rotation.x = swingAngle;
         char.rightLegPivot.rotation.x = -swingAngle;
@@ -216,7 +271,6 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
         char.rightLegPivot.rotation.x = 0.2;
     }
 
-    // --- 2. 回転斬りスピン中 ---
     if (isSpinAttack && spinRatio > 0) {
         const fullReach = 2.4 + chargeLevel * 5.6;
         const armLength = fullReach - 0.3;
@@ -235,7 +289,6 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
         return;
     }
 
-    // --- 3. 回転斬り溜め中 ---
     if (isHoldingSpin) {
         char.rightArm.scale.set(1.0, 0.6, 1.0);
         const t = Math.min(1.0, holdingCharge);
@@ -252,7 +305,6 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
         return;
     }
 
-    // --- 4. 通常時 ---
     if (punchRatio === 0) {
         char.rightArm.scale.set(1.0, 0.6, 1.0);
         char.torsoGroup.rotation.y = 0;
@@ -270,7 +322,6 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
         char.rightArmPivot.rotation.y = 0;
         char.rightArmPivot.rotation.z = 0;
     } else {
-        // --- 5. 通常パンチ ---
         const fullReach = 2.4 + chargeLevel * 5.6;
         const maxArmLength = fullReach - 0.3;
 
@@ -309,9 +360,9 @@ function updateCharacterMotion(char, swingAngle, isOnGround, punchRatio = 0, cha
             const t = (punchRatio - 0.78) / 0.22;
             char.rightArm.scale.set(1.0, 0.6, 1.0);
             char.torsoGroup.rotation.y = THREE.MathUtils.lerp(-0.7, 0, t);
-            char.torsoGroup.position.z = THREE.MathUtils.lerp(0.3, 0, t);
+            char.torsoGroup.position.z = 0.3;
 
-            char.rightArmPivot.rotation.x = -Math.PI / 2;
+            char.rightArmPivot.rotation.x = THREE.MathUtils.lerp(-Math.PI / 2, 0, t);
             char.rightArmPivot.rotation.y = 0;
             char.rightArmPivot.rotation.z = 0;
 

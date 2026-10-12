@@ -120,7 +120,7 @@
             background: #ff3344 !important;
         }
 
-        /* 画面右下：スキルアイコンラッパー */
+        /* スキルアイコンラッパー */
         #skills-wrapper {
             position: absolute;
             bottom: 25px;
@@ -255,7 +255,8 @@
         }
 
         #settings-modal,
-        #keyconfig-modal {
+        #keyconfig-modal,
+        #battle-result-modal {
             display: none;
             position: absolute;
             top: 50%;
@@ -275,6 +276,12 @@
             max-height: 80vh;
             overflow-y: auto;
             z-index: 110;
+        }
+
+        #battle-result-modal {
+            min-width: 380px;
+            text-align: center;
+            z-index: 150;
         }
 
         h2 {
@@ -324,6 +331,38 @@
 
         .btn-action:hover {
             background: #138496;
+        }
+
+        #host-battle-btn {
+            display: none;
+            width: 100%;
+            padding: 12px 0;
+            margin-top: 15px;
+            font-size: 15px;
+            font-weight: bold;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            transition: background 0.2s, opacity 0.2s;
+        }
+
+        #host-battle-btn.start-mode {
+            background: linear-gradient(135deg, #ff8800, #ff3344);
+            color: white;
+            box-shadow: 0 0 15px rgba(255, 68, 68, 0.6);
+        }
+
+        #host-battle-btn.stop-mode {
+            background: #dc3545;
+            color: white;
+        }
+
+        #host-battle-btn:disabled {
+            background: #444 !important;
+            color: #888 !important;
+            cursor: not-allowed !important;
+            box-shadow: none !important;
+            opacity: 0.6;
         }
 
         #name-changed-toast {
@@ -419,6 +458,132 @@
         .btn-reset-config:hover {
             background: #c82333;
         }
+
+        /* ===================================================
+           【新機能：画面上部アナウンステキスト】
+        =================================================== */
+        #battle-announce-banner {
+            display: none;
+            position: absolute;
+            top: 25px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(90deg, transparent, rgba(20, 25, 35, 0.88) 20%, rgba(20, 25, 35, 0.88) 80%, transparent);
+            padding: 10px 40px;
+            color: #ffcc00;
+            font-size: 20px;
+            font-weight: bold;
+            letter-spacing: 3px;
+            text-shadow: 0 0 10px rgba(255, 204, 0, 0.6);
+            pointer-events: none;
+            z-index: 180;
+            border-top: 1px solid rgba(255, 204, 0, 0.5);
+            border-bottom: 1px solid rgba(255, 204, 0, 0.5);
+        }
+
+        /* ===================================================
+           【改良：大迫力・躍動感あるカウントダウン演出】
+        =================================================== */
+        #battle-countdown-overlay {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 110px;
+            font-weight: 900;
+            color: #ffea00;
+            text-shadow: 0 0 30px rgba(255, 234, 0, 0.9), 0 0 60px rgba(255, 68, 68, 0.9);
+            pointer-events: none;
+            z-index: 200;
+        }
+
+        .countdown-animate {
+            animation: slamZoom 0.95s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+        }
+
+        @keyframes slamZoom {
+            0% {
+                transform: translate(-50%, -50%) scale(2.6);
+                opacity: 0;
+                filter: blur(10px);
+            }
+
+            35% {
+                transform: translate(-50%, -50%) scale(0.95);
+                opacity: 1;
+                filter: blur(0px);
+            }
+
+            55% {
+                transform: translate(-50%, -50%) scale(1.05);
+            }
+
+            85% {
+                transform: translate(-50%, -50%) scale(1.0);
+                opacity: 1;
+            }
+
+            100% {
+                transform: translate(-50%, -50%) scale(1.15);
+                opacity: 0;
+            }
+        }
+
+        /* リザルト画面 */
+        #result-winner-title {
+            font-size: 24px;
+            color: #ffea00;
+            margin: 10px 0 15px 0;
+            text-shadow: 0 0 15px rgba(255, 234, 0, 0.6);
+        }
+
+        .result-list {
+            margin: 15px 0;
+            text-align: left;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 8px;
+            padding: 10px 15px;
+            max-height: 240px;
+            overflow-y: auto;
+        }
+
+        .result-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 15px;
+        }
+
+        .result-row.rank-1 {
+            color: #ffea00;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .result-heart-txt {
+            color: #ff3366;
+            font-weight: bold;
+            letter-spacing: 2px;
+        }
+
+        .result-next-btn {
+            width: 100%;
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 12px 0;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 15px;
+        }
+
+        .result-next-btn:hover {
+            background: #218838;
+        }
     </style>
 </head>
 
@@ -482,6 +647,12 @@
     <div id="sickness-dot"></div>
     <div id="vignette-overlay"></div>
 
+    <!-- 画面上部アナウンスバナー -->
+    <div id="battle-announce-banner">ストック制バトルを開始します</div>
+
+    <!-- カウントダウン演出 -->
+    <div id="battle-countdown-overlay">3</div>
+
     <button id="settings-btn">⚙ 設定</button>
 
     <!-- 環境設定モーダル -->
@@ -505,6 +676,7 @@
             ウルトラ3D酔い防止（バイザー・スタビライザー）
         </label>
 
+        <button id="host-battle-btn" class="start-mode">ストック制バトルを開始</button>
         <button class="btn-action" id="open-keyconfig-btn">🎮 キーコンフィグを開く</button>
         <button class="close-btn" id="close-settings-btn">閉じる</button>
     </div>
@@ -545,11 +717,17 @@
         </div>
     </div>
 
-    <!-- ライブラリの読み込み -->
+    <!-- リザルト画面モーダル（ボタンテキストを「閉じる」に変更） -->
+    <div id="battle-result-modal">
+        <h2 id="result-modal-header">🏆 BATTLE RESULT</h2>
+        <div id="result-winner-title">Winner: Player_XXXX</div>
+        <div class="result-list" id="result-list-container"></div>
+        <button class="result-next-btn" id="result-next-btn">閉じる</button>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
 
-    <!-- 分割された各モジュールの読み込み -->
     <script src="character.js"></script>
     <script src="controls.js"></script>
     <script src="stage.js"></script>
