@@ -35,6 +35,7 @@ scene.add(dirLight);
 const DEFAULT_STAGE_SIZE = 60.0;
 let stageSize = DEFAULT_STAGE_SIZE;
 let halfStage = stageSize / 2; // 30m
+let isStageCompletelyGone = false; // 【新機能】完全消滅フラグ
 
 const floorGeo = new THREE.BoxGeometry(DEFAULT_STAGE_SIZE, 2, DEFAULT_STAGE_SIZE);
 const floorMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
@@ -51,13 +52,11 @@ scene.add(cliff);
 
 // 障害物データ管理配列
 const obstacles = [];
-const dynamicBlockObjects = []; // 物理落下シミュレーション用オブジェクト配列
+const dynamicBlockObjects = [];
 
 const boxGeo = new THREE.BoxGeometry(2, 2, 2);
 
-// 初期ブロックの生成と配置
 function setupInitialBlocks() {
-    // 既存ブロックの完全破棄
     dynamicBlockObjects.forEach(b => {
         if (b.mesh) scene.remove(b.mesh);
     });
@@ -114,24 +113,21 @@ function setupInitialBlocks() {
 }
 setupInitialBlocks();
 
-// 【新機能】ステージとブロックをバトル開始前の初期状態へ完全復元
 function resetStageToInitial() {
     stageSize = DEFAULT_STAGE_SIZE;
     halfStage = stageSize / 2;
+    isStageCompletelyGone = false; // フラグ解除
 
-    // 床・崖のスケールを元に戻す
     floor.scale.set(1, 1, 1);
     floor.visible = true;
     cliff.scale.set(1, 1, 1);
     cliff.visible = true;
 
-    // ブロック35個を完全復元
     setupInitialBlocks();
 }
 
-// 【新機能】ステージ動的縮小 ＆ ブロック物理落下の毎フレーム更新
+// ステージ動的縮小 ＆ ブロック物理落下の更新
 function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
-    // バトル開始から180秒経過で縮小開始、さらに180秒（計360秒）で完全消滅
     if (elapsedSeconds >= 180) {
         const shrinkProgress = Math.min(1.0, (elapsedSeconds - 180) / 180.0); // 0.0 -> 1.0
         stageSize = DEFAULT_STAGE_SIZE * (1.0 - shrinkProgress);
@@ -141,20 +137,27 @@ function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
         floor.scale.set(scaleRatio, 1, scaleRatio);
         cliff.scale.set(scaleRatio, 1, scaleRatio);
 
+        // 【重要】360秒経過して完全消滅した場合、足場判定を物理的にもゼロにする
         if (shrinkProgress >= 1.0) {
+            stageSize = 0;
+            halfStage = 0;
+            isStageCompletelyGone = true;
             floor.visible = false;
             cliff.visible = false;
+        } else {
+            isStageCompletelyGone = false;
         }
+    } else {
+        isStageCompletelyGone = false;
     }
 
-    // ブロックの足場喪失判定（A案：重心基準）＆落下物理
     const blockGravity = -26.0;
     for (let b of dynamicBlockObjects) {
         if (b.isDestroyed) continue;
 
-        // 重心が縮小後のステージ外に出た場合、落下開始
         if (!b.isFalling) {
-            if (Math.abs(b.x) > halfStage || Math.abs(b.z) > halfStage) {
+            // ステージが完全消滅したか、重心が外にはみ出たら落下
+            if (isStageCompletelyGone || Math.abs(b.x) > halfStage || Math.abs(b.z) > halfStage) {
                 b.isFalling = true;
             }
         }
@@ -164,13 +167,11 @@ function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
             b.y += b.vy * delta;
             b.mesh.position.y = b.y;
 
-            // 落下中もAABB当たり判定をリアルタイム更新（プレイヤーが乗れる・ぶつかる）
             if (b.obsData) {
                 b.obsData.minY = b.y - 1;
                 b.obsData.maxY = b.y + 1;
             }
 
-            // 奈落の底（Y < -25m）に到達したら消去
             if (b.y < -25) {
                 b.isDestroyed = true;
                 scene.remove(b.mesh);

@@ -1,5 +1,5 @@
 // =======================================================
-// モジュール2: 操作・UI・キーコンフィグ・リアルタイム視点保証
+// モジュール2: 操作・UI・キーコンフィグ・非アクティブ時間管理
 // =======================================================
 
 const Controls = {
@@ -22,11 +22,13 @@ const Controls = {
     dashStamina: 100.0,
     isExhausted: false,
 
+    // 攻撃＆溜め管理
     isHoldingAttack: false,
     attackType: 'punch',
     chargeTime: 0,
     chargeLevel: 0,
 
+    // スキルCT管理
     spinStacks: 2,
     spinMaxStacks: 2,
     spinCooldownTimer: 0,
@@ -37,6 +39,12 @@ const Controls = {
 
     isCountdownActive: false,
     isEliminated: false,
+
+    // 【新機能】ジャンプの単発判定用フラグ（長押し連続ジャンプ防止）
+    prevJumpHeld: false,
+
+    // 【新機能】タブ非アクティブ時間の計測用
+    lastHiddenTimestamp: 0,
 
     activeKeys: {},
     activeMouseButtons: {},
@@ -79,6 +87,56 @@ const Controls = {
         this.loadKeyBindings();
         this.initUI(onNameChangeCallback, onHostBattleToggle, onReturnToFree);
         this.initEventListeners();
+        this.initVisibilityHandler();
+    },
+
+    // 【新機能】タブが裏画面にいた時間を計測し、復帰時にスタミナ回復＆スキルCTを進める
+    initVisibilityHandler() {
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                // 非アクティブになった時刻を記録
+                this.lastHiddenTimestamp = Date.now();
+            } else {
+                // アクティブに復帰した時、経過した秒数を一括適用！
+                if (this.lastHiddenTimestamp > 0) {
+                    const elapsedSeconds = (Date.now() - this.lastHiddenTimestamp) / 1000.0;
+                    this.applyCatchupTime(elapsedSeconds);
+                    this.lastHiddenTimestamp = 0;
+                }
+            }
+        });
+    },
+
+    // 非アクティブ時間のスタミナ回復・CT短縮一括処理
+    applyCatchupTime(seconds) {
+        if (seconds <= 0) return;
+
+        // スタミナの回復（秒速5%回復）
+        this.dashStamina = Math.min(100.0, this.dashStamina + 5.0 * seconds);
+        if (this.isExhausted && this.dashStamina >= 20.0) {
+            this.isExhausted = false;
+        }
+
+        // スキルCT短縮（ドラゴンダイブ）
+        if (this.diveCooldownTimer > 0) {
+            this.diveCooldownTimer = Math.max(0, this.diveCooldownTimer - seconds);
+        }
+
+        // スキルCT短縮（回転斬りスタック回復）
+        let remainingTime = seconds;
+        while (this.spinStacks < this.spinMaxStacks && remainingTime > 0) {
+            if (this.spinCooldownTimer <= 0) {
+                this.spinCooldownTimer = this.readonlyCooldown;
+            }
+            if (remainingTime >= this.spinCooldownTimer) {
+                remainingTime -= this.spinCooldownTimer;
+                this.spinStacks++;
+                this.spinCooldownTimer = (this.spinStacks < this.spinMaxStacks) ? this.readonlyCooldown : 0;
+            } else {
+                this.spinCooldownTimer -= remainingTime;
+                remainingTime = 0;
+            }
+        }
     },
 
     loadKeyBindings() {
@@ -508,7 +566,6 @@ const Controls = {
             this.activeMouseButtons[e.button] = true;
 
             const lookBtn = Number(this.bindings.lookDrag !== undefined ? this.bindings.lookDrag : 2);
-            // カウントダウン中であっても右ドラッグ視点移動は完全に即時有効！
             if (!this.isKeyConfigOpen && (e.button === lookBtn || e.button === 2)) {
                 this.isDragging = true;
                 this.previousMousePosition = { x: e.clientX, y: e.clientY };
@@ -586,7 +643,16 @@ const Controls = {
         this.diveCooldownTimer = 0;
         this.dashStamina = 100.0;
         this.isExhausted = false;
+        this.prevJumpHeld = false;
         this.cancelPunchCharge();
+
+        const dashBarFill = document.getElementById('dash-bar-fill');
+        const dashText = document.getElementById('dash-text');
+        if (dashBarFill && dashText) {
+            dashBarFill.style.width = '100%';
+            dashText.textContent = '100%';
+            dashBarFill.classList.remove('exhausted');
+        }
     },
 
     isKeyOrCombinationPressed(bindingVal) {
@@ -629,7 +695,7 @@ const Controls = {
     },
 
     getInputs(delta) {
-        // --- 1. クールタイム進行 ---
+        // スキルCT進行
         if (this.spinStacks < this.spinMaxStacks) {
             this.spinCooldownTimer -= delta;
             if (this.spinCooldownTimer <= 0) {
@@ -683,7 +749,7 @@ const Controls = {
             }
         }
 
-        // --- 2. ゲームパッドの視点操作（カウントダウン中・脱落中も最優先で受付） ---
+        // ゲームパッド視点操作
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
         const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
 
@@ -712,7 +778,7 @@ const Controls = {
             }
         }
 
-        // --- 3. 【最重要修正】カメラスムージング（角度更新）は絶対にスキップせず最優先で毎フレーム実行！ ---
+        // カメラスムージング
         if (this.antiSickness) {
             const smoothFactor = Math.min(1.0, 14.0 * delta);
             this.currentYaw += (this.targetYaw - this.currentYaw) * smoothFactor;
@@ -722,7 +788,6 @@ const Controls = {
             this.currentPitch = this.targetPitch;
         }
 
-        // キーコンフィグ中
         if (this.isKeyConfigOpen) {
             this.cancelPunchCharge();
             return {
@@ -732,7 +797,6 @@ const Controls = {
             };
         }
 
-        // 【カウントダウン中】：キャラ操作のみロック（視点はリアルタイム更新済み）
         if (this.isCountdownActive) {
             this.cancelPunchCharge();
             return {
@@ -750,9 +814,11 @@ const Controls = {
         if (this.isKeyOrCombinationPressed(this.bindings.left)) inputX -= 1;
         if (this.isKeyOrCombinationPressed(this.bindings.right)) inputX += 1;
 
-        let jump = this.isKeyOrCombinationPressed(this.bindings.jump);
-        let isDashRequested = this.isKeyOrCombinationPressed(this.bindings.dash);
+        // 【修正点】ジャンプの単発トリガー化（長押し連続ジャンプを完全に防止！）
+        let isJumpKeyCurrentlyHeld = this.isKeyOrCombinationPressed(this.bindings.jump);
+        let isPadJumpCurrentlyHeld = false;
 
+        let isDashRequested = this.isKeyOrCombinationPressed(this.bindings.dash);
         let isPunchKeyPressed = this.isKeyOrCombinationPressed(this.bindings.punch);
         let isSpinKeyPressed = this.isKeyOrCombinationPressed(this.bindings.spinKey);
         let isDiveKeyPressed = this.isKeyOrCombinationPressed(this.bindings.diveKey);
@@ -768,13 +834,19 @@ const Controls = {
             if (stickLX !== 0) inputX = stickLX;
             if (stickLY !== 0) inputZ = -stickLY;
 
-            if (this.isPadButtonPressed(gp, this.bindings.padJump)) jump = true;
+            if (this.isPadButtonPressed(gp, this.bindings.padJump)) isPadJumpCurrentlyHeld = true;
             if (this.isPadButtonPressed(gp, this.bindings.padDash)) isDashRequested = true;
             if (this.isPadButtonPressed(gp, this.bindings.padPunch)) isPadPunchPressed = true;
             if (this.isPadButtonPressed(gp, this.bindings.padSpin)) isPadSpinPressed = true;
             if (this.isPadButtonPressed(gp, this.bindings.padDive)) isPadDivePressed = true;
         }
 
+        // 押された瞬間のみ true になるジャンプ判定
+        const isJumpAnyHeld = isJumpKeyCurrentlyHeld || isPadJumpCurrentlyHeld;
+        const jumpJustTriggered = isJumpAnyHeld && !this.prevJumpHeld;
+        this.prevJumpHeld = isJumpAnyHeld;
+
+        // ダッシュスタミナ
         const hasMovement = Math.hypot(inputX, inputZ) > 0.05;
         let isDashing = false;
 
@@ -799,11 +871,10 @@ const Controls = {
             else dashBarFill.classList.remove('exhausted');
         }
 
-        // 【脱落者】：移動は可能だが攻撃はロック（視点はリアルタイム更新済み）
         if (this.isEliminated) {
             this.cancelPunchCharge();
             return {
-                inputX, inputZ, jump, isDashing,
+                inputX, inputZ, jump: jumpJustTriggered, isDashing,
                 attackTriggered: false, attackType: 'punch', chargeLevel: 0,
                 isHoldingAttack: false, currentHoldingCharge: 0, diveTriggered: false
             };
@@ -862,7 +933,7 @@ const Controls = {
         return {
             inputX,
             inputZ,
-            jump,
+            jump: jumpJustTriggered, // 単発トリガーとして返す
             isDashing,
             attackTriggered,
             attackType: triggeredAttackType,

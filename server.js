@@ -17,7 +17,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 全プレイヤーデータ
 const players = {};
 let hostId = null;
 
@@ -40,7 +39,6 @@ function getAvailableColor() {
     return playerColors[Math.floor(Math.random() * playerColors.length)];
 }
 
-// 【重要修正】クライアント側(stage.js)と完全に同一順序（色・X・Zの3回）で乱数を回し、ブロック座標を完全一致させる！
 const obstacleBoxes = [];
 let seed = 12345;
 function seededRandom() {
@@ -48,9 +46,9 @@ function seededRandom() {
     return seed / 233280;
 }
 for (let i = 0; i < 35; i++) {
-    seededRandom(); // 1回目: 色決定用（クライアント側と同期）
-    const bx = (seededRandom() - 0.5) * 44; // 2回目: X座標
-    const bz = (seededRandom() - 0.5) * 44; // 3回目: Z座標
+    seededRandom();
+    const bx = (seededRandom() - 0.5) * 44;
+    const bz = (seededRandom() - 0.5) * 44;
     obstacleBoxes.push({
         minX: bx - 1.0,
         maxX: bx + 1.0,
@@ -59,7 +57,6 @@ for (let i = 0; i < 35; i++) {
     });
 }
 
-// ブロックとの重複判定（プレイヤー半径0.45m + 余裕0.2m）
 function isCollidingWithBlocks(x, z) {
     const r = 0.65;
     for (let b of obstacleBoxes) {
@@ -70,7 +67,6 @@ function isCollidingWithBlocks(x, z) {
     return false;
 }
 
-// ルーム入室時の安全スポーン位置
 function generateSafeRoomSpawn() {
     for (let attempts = 0; attempts < 500; attempts++) {
         const x = (Math.random() - 0.5) * 20;
@@ -82,7 +78,6 @@ function generateSafeRoomSpawn() {
     return { x: 0, y: 0, z: 0 };
 }
 
-// ストック制バトル開始時の安全スポーン位置（15m以内、他プレイヤー回避、ブロック回避）
 function generateBattleSpawnPositions(count) {
     const positions = [];
     const minDistance = 3.5;
@@ -91,7 +86,7 @@ function generateBattleSpawnPositions(count) {
         let placed = false;
         for (let attempts = 0; attempts < 800; attempts++) {
             const angle = Math.random() * Math.PI * 2;
-            const radius = 3.0 + Math.random() * 11.5; // 3m〜14.5m
+            const radius = 3.0 + Math.random() * 11.5;
             const x = Math.sin(angle) * radius;
             const z = Math.cos(angle) * radius;
 
@@ -105,14 +100,12 @@ function generateBattleSpawnPositions(count) {
             }
         }
         if (!placed) {
-            // 万が一見つからない場合はブロックのない外周の確定安全位置に配置
             positions.push({ x: (i * 3) - 6, y: 0, z: (i * 3) - 6 });
         }
     }
     return positions;
 }
 
-// ハート形式文字列への変換
 function formatStockToHearts(stock) {
     if (stock >= 3) return '♥♥♥';
     if (stock === 2) return '♥♥♡';
@@ -133,12 +126,21 @@ function updateRoomInfo() {
     });
 }
 
-// バトル強制終了処理
-function forceEndStockBattle(reason = 'manual') {
-    if (currentMode !== 'stock_battle') return;
-
+// 【重要新機能】バトル終了時に全プレイヤーの状態を一括リセットする関数
+function resetAllPlayersToFreeMode() {
     currentMode = 'free';
     battleStartTime = 0;
+
+    Object.values(players).forEach(p => {
+        p.stock = 3;
+        p.damage = 0;
+        p.isEliminated = false;
+        p.joinedMidBattle = false;
+    });
+}
+
+function forceEndStockBattle(reason = 'manual') {
+    if (currentMode !== 'stock_battle') return;
 
     const results = Object.values(players).map(p => ({
         id: p.id,
@@ -146,6 +148,8 @@ function forceEndStockBattle(reason = 'manual') {
         stock: p.stock,
         heartDisplay: formatStockToHearts(p.stock)
     }));
+
+    resetAllPlayersToFreeMode(); // 全員一括リセット
 
     io.emit('battleFinished', {
         results: results,
@@ -155,7 +159,6 @@ function forceEndStockBattle(reason = 'manual') {
     updateRoomInfo();
 }
 
-// 生存者判定
 function checkStockBattleWinner() {
     if (currentMode !== 'stock_battle') return;
 
@@ -163,8 +166,6 @@ function checkStockBattleWinner() {
     const alivePlayers = participants.filter(p => p.stock > 0);
 
     if (alivePlayers.length <= 1 && participants.length >= 2) {
-        currentMode = 'free';
-        battleStartTime = 0;
         const winner = alivePlayers[0] || null;
 
         const results = [];
@@ -192,6 +193,8 @@ function checkStockBattleWinner() {
             }
         });
 
+        resetAllPlayersToFreeMode(); // 全員一括リセット
+
         io.emit('battleFinished', {
             results: results,
             isForceEnd: false
@@ -206,8 +209,6 @@ io.on('connection', (socket) => {
     const assignedColor = getAvailableColor();
     const defaultName = `Player_${socket.id.substring(0, 4)}`;
     const isMidJoin = (currentMode === 'stock_battle');
-
-    // ブロックと重ならない安全スポーン位置を決定
     const initSpawn = generateSafeRoomSpawn();
 
     players[socket.id] = {
@@ -322,8 +323,14 @@ io.on('connection', (socket) => {
         });
     });
 
+    // 【重要新機能】衝撃波イベントに送信タイムスタンプを付与（遅延一斉再生の防止用）
     socket.on('spawnShockwave', (data) => {
-        socket.broadcast.emit('shockwaveSpawned', { x: data.x, y: data.y, z: data.z });
+        socket.broadcast.emit('shockwaveSpawned', {
+            x: data.x,
+            y: data.y,
+            z: data.z,
+            timestamp: Date.now()
+        });
     });
 
     const handleFall = (targetId) => {
@@ -364,17 +371,6 @@ io.on('connection', (socket) => {
 
     socket.on('targetFellOut', (data) => {
         handleFall(data.targetId);
-    });
-
-    socket.on('returnToFreeMode', () => {
-        const p = players[socket.id];
-        if (p) {
-            p.stock = 3;
-            p.damage = 0;
-            p.isEliminated = false;
-            p.joinedMidBattle = false;
-            io.emit('playerReturnedToFree', { id: socket.id });
-        }
     });
 
     socket.on('updateTargetPosition', (data) => {

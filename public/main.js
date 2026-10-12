@@ -1,5 +1,5 @@
 // =======================================================
-// モジュール3: ゲームループ・新スキル・完全描画保証
+// モジュール3: ゲームループ・新スキル・完全同期管理
 // =======================================================
 
 // --- 1. プレイヤーキャラクターの管理 ---
@@ -14,6 +14,8 @@ scene.add(playerGroup);
 
 const otherPlayers = {};
 
+let ignoreEffectsUntilTimestamp = 0;
+
 Controls.init(
     (newName) => {
         socket.emit('changeName', newName);
@@ -26,7 +28,8 @@ Controls.init(
         }
     },
     () => {
-        handleReturnToFreeMode();
+        const resultModal = document.getElementById('battle-result-modal');
+        if (resultModal) resultModal.style.display = 'none';
     }
 );
 
@@ -68,7 +71,6 @@ socket.on('init', (data) => {
     const myData = data.players[myId];
     if (myData) {
         playerGroup.position.set(myData.x, myData.y, myData.z);
-        // 【二重防壁】スポーン時のブロックめり込みを即座に安全脱出
         unstickFromObstacles(playerGroup.position);
 
         if (myCharacter.bodyMesh && myCharacter.bodyMesh.material) {
@@ -162,7 +164,12 @@ socket.on('playerMoved', (data) => {
         p.isDiving = data.isDiving || false;
         p.diveRatio = data.diveRatio || 0;
         p.isInvincible = data.isInvincible || false;
-        p.isKnockedOut = false;
+
+        // 相手が着地した時にノックバック状態を解除（空中吹っ飛び中は維持）
+        if (data.isOnGround) {
+            p.isKnockedOut = false;
+        }
+        p.lastPacketTime = Date.now();
     }
 });
 
@@ -176,7 +183,6 @@ socket.on('battleStarted', (data) => {
     Controls.isEliminated = false;
     setCharacterGhostMode(myCharacter, false);
 
-    // 古いリザルト画面の強制破棄
     const resultModal = document.getElementById('battle-result-modal');
     if (resultModal) resultModal.style.display = 'none';
 
@@ -184,6 +190,7 @@ socket.on('battleStarted', (data) => {
     myDamage = 0;
     myStock = 3;
     myInvincibleTimer = 0;
+    isKnockedBack = false;
 
     updateNameSpriteDamage(myCharacter.nameObj, 0);
     updateNameSpriteStock(myCharacter.nameObj, 3);
@@ -191,9 +198,7 @@ socket.on('battleStarted', (data) => {
     const myData = data.players[myId];
     if (myData) {
         playerGroup.position.set(myData.x, 0, myData.z);
-        // 【二重防壁】開始スポーン時のブロックめり込みを即時回避
         unstickFromObstacles(playerGroup.position);
-
         velocityX = 0;
         velocityZ = 0;
         yVelocity = 0;
@@ -214,6 +219,7 @@ socket.on('battleStarted', (data) => {
             op.mesh.position.set(pData.x, 0, pData.z);
             updateNameSpriteDamage(op.nameObj, 0);
             updateNameSpriteStock(op.nameObj, 3);
+            setCharacterGhostMode(op.charObj, false);
         }
     }
 
@@ -224,12 +230,10 @@ socket.on('battleStarted', (data) => {
     startCountdownSequence();
 });
 
-// 【改良】大迫力カウントダウン ＆ 上部アナウンス演出
 function startCountdownSequence() {
     if (document.activeElement) document.activeElement.blur();
     Controls.isCountdownActive = true;
 
-    // 画面上部アナウンスバナー表示
     const announceBanner = document.getElementById('battle-announce-banner');
     if (announceBanner) announceBanner.style.display = 'block';
 
@@ -238,7 +242,7 @@ function startCountdownSequence() {
 
     const playCountNumber = (txt, color) => {
         overlay.classList.remove('countdown-animate');
-        void overlay.offsetWidth; // リフロー発生でアニメーションを毎回最初から再生
+        void overlay.offsetWidth;
         overlay.textContent = txt;
         overlay.style.color = color;
         overlay.style.display = 'block';
@@ -256,7 +260,6 @@ function startCountdownSequence() {
     }, 2000);
 
     setTimeout(() => {
-        // GO! と同時に上部バナー消去＆操作解禁！
         if (announceBanner) announceBanner.style.display = 'none';
         playCountNumber('GO!', '#00ff88');
         Controls.isCountdownActive = false;
@@ -289,13 +292,32 @@ socket.on('playerEliminated', (data) => {
     }
 });
 
-// バトル終了（リザルト画面表示）
 socket.on('battleFinished', (data) => {
     currentRoomMode = 'free';
     currentBattleStartTime = 0;
     updateHostButtonUI();
 
     resetStageToInitial();
+
+    myStock = null;
+    Controls.isEliminated = false;
+    setCharacterGhostMode(myCharacter, false);
+    Controls.resetAllSkillsAndStamina();
+    myDamage = 0;
+    myInvincibleTimer = 0;
+    isKnockedBack = false;
+    updateNameSpriteDamage(myCharacter.nameObj, 0);
+    updateNameSpriteStock(myCharacter.nameObj, null);
+
+    for (let id in otherPlayers) {
+        const op = otherPlayers[id];
+        op.isEliminated = false;
+        op.mesh.visible = true;
+        op.invincibleTimer = 0;
+        updateNameSpriteStock(op.nameObj, null);
+        updateNameSpriteDamage(op.nameObj, 0);
+        setCharacterGhostMode(op.charObj, false);
+    }
 
     const resultModal = document.getElementById('battle-result-modal');
     const headerTitle = document.getElementById('result-modal-header');
@@ -313,7 +335,6 @@ socket.on('battleFinished', (data) => {
         data.results.forEach(res => {
             const row = document.createElement('div');
             row.className = 'result-row';
-            // 【仕様変更】「残ストック：」ラベルを削除し、ハートのみを表示！
             row.innerHTML = `<span>${res.name}</span><span class="result-heart-txt">${res.heartDisplay}</span>`;
             listContainer.appendChild(row);
         });
@@ -326,7 +347,6 @@ socket.on('battleFinished', (data) => {
             const row = document.createElement('div');
             row.className = `result-row ${res.rank === 1 ? 'rank-1' : ''}`;
             const rankLabel = res.rank === 1 ? '👑 1位' : `${res.rank}位`;
-            // 【仕様変更】ハートのみ表示
             const stockLabel = (res.rank === 1 && res.stock > 0) ? `<span class="result-heart-txt">${res.heartDisplay}</span>` : '脱落';
             row.innerHTML = `<span>${rankLabel}: ${res.name}</span><span>${stockLabel}</span>`;
             listContainer.appendChild(row);
@@ -334,29 +354,6 @@ socket.on('battleFinished', (data) => {
     }
 
     resultModal.style.display = 'block';
-});
-
-function handleReturnToFreeMode() {
-    myStock = null;
-    Controls.isEliminated = false;
-    setCharacterGhostMode(myCharacter, false);
-    Controls.resetAllSkillsAndStamina();
-    myDamage = 0;
-    updateNameSpriteDamage(myCharacter.nameObj, 0);
-    updateNameSpriteStock(myCharacter.nameObj, null);
-
-    resetStageToInitial();
-    socket.emit('returnToFreeMode');
-}
-
-socket.on('playerReturnedToFree', (data) => {
-    if (otherPlayers[data.id]) {
-        const op = otherPlayers[data.id];
-        op.isEliminated = false;
-        op.mesh.visible = true;
-        updateNameSpriteStock(op.nameObj, null);
-        updateNameSpriteDamage(op.nameObj, 0);
-    }
 });
 
 socket.on('playerKnocked', (data) => {
@@ -369,6 +366,7 @@ socket.on('playerKnocked', (data) => {
 
         if (isDiving) isDiving = false;
 
+        // 被弾フラグを立てて吹き飛び初速を設定
         isKnockedBack = true;
         velocityX = data.dirX * data.force;
         velocityZ = data.dirZ * data.force;
@@ -393,6 +391,10 @@ socket.on('playerKnocked', (data) => {
 });
 
 socket.on('shockwaveSpawned', (data) => {
+    if (document.hidden) return;
+    if (Date.now() < ignoreEffectsUntilTimestamp) return;
+    if (data.timestamp && (Date.now() - data.timestamp > 800)) return;
+
     createShockwaveEffect(data.x, data.y, data.z);
 });
 
@@ -410,7 +412,7 @@ socket.on('playerForceRespawned', (data) => {
         updateNameSpriteDamage(myCharacter.nameObj, 0);
 
         if (!data.isEliminated && !Controls.isEliminated) {
-            myInvincibleTimer = 2.0;
+            myInvincibleTimer = 2.0; // 2秒間の無敵付与
         } else {
             myInvincibleTimer = 0;
         }
@@ -463,9 +465,23 @@ socket.on('syncSelf', (serverData) => {
 });
 
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && socket.connected) socket.emit('requestSync');
+    if (!document.hidden) {
+        ignoreEffectsUntilTimestamp = Date.now() + 350;
+        prevTime = performance.now();
+
+        if (isDiving) {
+            isDiving = false;
+        }
+        if (isPunching) isPunching = false;
+        if (isSpinAttack) isSpinAttack = false;
+        Controls.cancelPunchCharge();
+
+        if (socket.connected) socket.emit('requestSync');
+    }
 });
+
 window.addEventListener('focus', () => {
+    prevTime = performance.now();
     if (socket.connected) socket.emit('requestSync');
 });
 
@@ -518,7 +534,8 @@ function addOtherPlayer(data) {
         isAttacker: false,
         hasReportedSettlement: false,
         hasReportedFall: false,
-        invincibleTimer: 0
+        invincibleTimer: 0,
+        lastPacketTime: Date.now()
     };
 }
 
@@ -535,10 +552,22 @@ const SPIN_TOTAL_TIME = 0.36;
 let spinChargeLevel = 0;
 const hitTargetsThisSpin = new Set();
 
+// 【新仕様：確実な物理駆動ドラゴンダイブ】
 let isDiving = false;
-let diveElapsed = 0;
-const DIVE_ARC_TIME = 0.35;
-let diveOriginY = 0;
+let divePhase = 'idle';
+let diveTimer = 0;
+const DIVE_RISE_DURATION = 0.16;
+const DIVE_FALL_DURATION = 0.19;
+let diveApexY = 16.0;
+
+function startDragonDive() {
+    isDiving = true;
+    divePhase = 'rising';
+    diveTimer = 0;
+    diveApexY = Math.max(16.0, playerGroup.position.y + 16.0);
+    isOnGround = false;
+    Controls.consumeDive();
+}
 
 // --- 4. メインゲームループ ---
 let velocityX = 0;
@@ -564,6 +593,20 @@ function animate() {
         const delta = Math.min((time - prevTime) / 1000, 0.1);
         prevTime = time;
 
+        // 【最重要修正】自身の無敵タイマー減算および仕様通りの高速点滅処理
+        if (myInvincibleTimer > 0) {
+            myInvincibleTimer = Math.max(0, myInvincibleTimer - delta);
+            if (myInvincibleTimer === 0) {
+                myCharacter.mesh.visible = true;
+            } else {
+                myCharacter.mesh.visible = (Math.floor(time / 80) % 2 === 0);
+            }
+        } else {
+            if (!Controls.isEliminated) {
+                myCharacter.mesh.visible = true;
+            }
+        }
+
         if (currentRoomMode === 'stock_battle' && currentBattleStartTime > 0) {
             const elapsedSeconds = (Date.now() - currentBattleStartTime) / 1000.0;
             updateStageShrinkAndPhysics(elapsedSeconds, delta);
@@ -571,25 +614,18 @@ function animate() {
 
         const input = Controls.getInputs(delta);
 
-        if (myInvincibleTimer > 0 && !Controls.isEliminated) {
-            myInvincibleTimer -= delta;
-            if (myInvincibleTimer <= 0) {
-                myInvincibleTimer = 0;
-                playerGroup.visible = true;
-            } else {
-                playerGroup.visible = (Math.floor(time / 80) % 2 === 0);
-            }
-        } else {
-            playerGroup.visible = true;
+        // 被弾吹っ飛び慣性の判定
+        const currentKnockSpeed = Math.hypot(velocityX, velocityZ);
+        if (isKnockedBack && currentKnockSpeed < 6.0) {
+            isKnockedBack = false;
         }
 
+        // ドラゴンダイブ発動条件
         if (input.diveTriggered && !isDiving && !isKnockedBack && Controls.diveCooldownTimer <= 0) {
-            isDiving = true;
-            diveElapsed = 0;
-            diveOriginY = playerGroup.position.y;
-            Controls.consumeDive();
+            startDragonDive();
         }
 
+        // 攻撃発動
         if (input.attackTriggered && !isPunching && !isSpinAttack && !isDiving) {
             if (input.attackType === 'spin') {
                 Controls.consumeSpinStack();
@@ -605,6 +641,7 @@ function animate() {
             }
         }
 
+        // ガイド表示
         if (input.isHoldingAttack && !isPunching && !isSpinAttack && !isDiving) {
             const predictedReach = 2.4 + input.currentHoldingCharge * 5.6;
 
@@ -628,11 +665,13 @@ function animate() {
         const baseSpeed = 11.0;
         let currentMaxSpeed = input.isDashing ? baseSpeed * 1.3 : baseSpeed;
 
+        // ドラゴンダイブ処理
         if (isDiving) {
-            diveElapsed += delta;
-            currentDiveRatio = Math.min(1.0, diveElapsed / DIVE_ARC_TIME);
+            diveTimer += delta;
+            const totalDiveTime = DIVE_RISE_DURATION + DIVE_FALL_DURATION;
+            currentDiveRatio = Math.min(1.0, diveTimer / totalDiveTime);
 
-            const diveMoveSpeed = 16.0 / DIVE_ARC_TIME;
+            const diveMoveSpeed = 16.0 / totalDiveTime;
             const diveInputMag = Math.hypot(input.inputX, input.inputZ);
 
             if (diveInputMag > 0.05) {
@@ -648,42 +687,48 @@ function animate() {
 
             moveWithCollision(playerGroup.position, velocityX, velocityZ, delta, false);
 
-            if (diveElapsed <= DIVE_ARC_TIME) {
-                const arcY = Math.sin((diveElapsed / DIVE_ARC_TIME) * Math.PI) * 16.0;
-                playerGroup.position.y = diveOriginY + arcY;
+            if (divePhase === 'rising') {
+                playerGroup.position.y = THREE.MathUtils.lerp(playerGroup.position.y, diveApexY, Math.min(1.0, 18.0 * delta));
+
+                if (diveTimer >= DIVE_RISE_DURATION) {
+                    divePhase = 'diving';
+                }
             } else {
-                yVelocity = -45.0;
+                yVelocity = -55.0;
                 playerGroup.position.y += yVelocity * delta;
-            }
 
-            const isOverStage = Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage;
-            let targetGroundY = -9999;
-            if (isOverStage) targetGroundY = 0;
+                const isOverStage = !isStageCompletelyGone && (Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage);
+                let targetGroundY = -9999;
+                if (isOverStage) targetGroundY = 0;
 
-            for (let obs of obstacles) {
-                const collideX = playerGroup.position.x + PLAYER_RADIUS > obs.minX && playerGroup.position.x - PLAYER_RADIUS < obs.maxX;
-                const collideZ = playerGroup.position.z + PLAYER_RADIUS > obs.minZ && playerGroup.position.z - PLAYER_RADIUS < obs.maxZ;
-                if (collideX && collideZ && playerGroup.position.y >= obs.maxY - 0.3) {
-                    if (obs.maxY > targetGroundY) targetGroundY = obs.maxY;
+                for (let obs of obstacles) {
+                    const collideX = playerGroup.position.x + PLAYER_RADIUS > obs.minX && playerGroup.position.x - PLAYER_RADIUS < obs.maxX;
+                    const collideZ = playerGroup.position.z + PLAYER_RADIUS > obs.minZ && playerGroup.position.z - PLAYER_RADIUS < obs.maxZ;
+                    if (collideX && collideZ && playerGroup.position.y >= obs.maxY - 0.3) {
+                        if (obs.maxY > targetGroundY) targetGroundY = obs.maxY;
+                    }
+                }
+
+                if (playerGroup.position.y <= targetGroundY) {
+                    playerGroup.position.y = targetGroundY;
+                    isDiving = false;
+                    divePhase = 'idle';
+                    currentDiveRatio = 0;
+                    velocityX = 0;
+                    velocityZ = 0;
+                    yVelocity = 0;
+                    isOnGround = true;
+                    triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket, Controls.isEliminated);
+                } else if (!isOverStage && playerGroup.position.y < 0) {
+                    isDiving = false;
+                    divePhase = 'idle';
+                    currentDiveRatio = 0;
+                    isOnGround = false;
+                    yVelocity = -40.0;
                 }
             }
-
-            if (diveElapsed > (DIVE_ARC_TIME * 0.5) && playerGroup.position.y <= targetGroundY) {
-                playerGroup.position.y = targetGroundY;
-                isDiving = false;
-                currentDiveRatio = 0;
-                velocityX = 0;
-                velocityZ = 0;
-                yVelocity = 0;
-                isOnGround = true;
-                triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket, Controls.isEliminated);
-            } else if (diveElapsed > DIVE_ARC_TIME && !isOverStage && playerGroup.position.y < 0) {
-                isDiving = false;
-                currentDiveRatio = 0;
-                isOnGround = false;
-                yVelocity = -35.0;
-            }
         } else {
+            // 通常移動計算
             const inputMagnitude = Math.hypot(input.inputX, input.inputZ);
             const hasInput = inputMagnitude > 0.05;
 
@@ -734,8 +779,7 @@ function animate() {
                 isOnGround = false;
             }
 
-            const isOverStage = Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage;
-
+            const isOverStage = !isStageCompletelyGone && (Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage);
             yVelocity += gravity * delta;
             const nextY = playerGroup.position.y + yVelocity * delta;
 
@@ -780,6 +824,7 @@ function animate() {
             yVelocity = 0;
             isOnGround = true;
             isDiving = false;
+            divePhase = 'idle';
             isKnockedBack = false;
             Controls.smoothedTargetY = 1.0;
 
@@ -848,10 +893,12 @@ function animate() {
 
         updateShockwaves(delta);
 
+        // カメラ更新
         const targetPos = new THREE.Vector3(playerGroup.position.x, playerGroup.position.y + 1.0, playerGroup.position.z);
         Controls.updateCamera(camera, targetPos, currentSpeed, currentMaxSpeed, delta);
 
         // 他プレイヤー処理
+        const nowMs = Date.now();
         for (let id in otherPlayers) {
             const op = otherPlayers[id];
 
@@ -860,6 +907,42 @@ function animate() {
                 continue;
             }
 
+            if (op.isDiving && (nowMs - op.lastPacketTime > 450)) {
+                op.isDiving = false;
+                op.diveRatio = 0;
+            }
+
+            if (nowMs - op.lastPacketTime > 250) {
+                op.swingAngle = 0;
+            }
+
+            const opOverStage = !isStageCompletelyGone && (Math.abs(op.targetX) <= halfStage && Math.abs(op.targetZ) <= halfStage);
+            let opFloorY = opOverStage ? 0 : -9999;
+
+            for (let obs of obstacles) {
+                const collideX = op.targetX + PLAYER_RADIUS > obs.minX && op.targetX - PLAYER_RADIUS < obs.maxX;
+                const collideZ = op.targetZ + PLAYER_RADIUS > obs.minZ && op.targetZ - PLAYER_RADIUS < obs.maxZ;
+                if (collideX && collideZ && op.targetY >= obs.maxY - 0.2) {
+                    if (obs.maxY > opFloorY) opFloorY = obs.maxY;
+                }
+            }
+
+            if (!op.isKnockedOut && (nowMs - op.lastPacketTime > 400) && op.targetY > opFloorY) {
+                op.targetY += gravity * delta;
+                if (op.targetY <= opFloorY) {
+                    op.targetY = opFloorY;
+                    op.isOnGround = true;
+                } else {
+                    op.isOnGround = false;
+                }
+
+                if (op.targetY < -25 && !op.hasReportedFall) {
+                    op.hasReportedFall = true;
+                    socket.emit('targetFellOut', { targetId: id });
+                }
+            }
+
+            // 相手の無敵時間タイマーと点滅
             if (op.invincibleTimer > 0) {
                 op.invincibleTimer -= delta;
                 if (op.invincibleTimer <= 0) {
@@ -872,6 +955,7 @@ function animate() {
                 op.mesh.visible = true;
             }
 
+            // 非アクティブ（裏画面）時の相手物理シミュレーション
             if (op.isKnockedOut) {
                 const opPos = { x: op.targetX, y: op.targetY, z: op.targetZ };
                 const opMoved = moveWithCollision(opPos, op.kbVX, op.kbVZ, delta, true);
@@ -891,7 +975,6 @@ function animate() {
                 op.kbVY += gravity * delta;
                 const opNextY = op.targetY + op.kbVY * delta;
 
-                const opOverStage = Math.abs(op.targetX) <= halfStage && Math.abs(op.targetZ) <= halfStage;
                 let opGroundY = (opOverStage && op.targetY >= -0.15) ? 0 : -9999;
 
                 for (let obs of obstacles) {
@@ -934,9 +1017,16 @@ function animate() {
                 }
             }
 
-            op.mesh.position.x += (op.targetX - op.mesh.position.x) * 0.25;
-            op.mesh.position.y += (op.targetY - op.mesh.position.y) * 0.25;
-            op.mesh.position.z += (op.targetZ - op.mesh.position.z) * 0.25;
+            // 相手キャラクターの位置追従（吹っ飛び中はより素早く追従）
+            const distToTarget = Math.hypot(op.targetX - op.mesh.position.x, op.targetZ - op.mesh.position.z);
+            if (distToTarget > 25.0) {
+                op.mesh.position.set(op.targetX, op.targetY, op.targetZ);
+            } else {
+                const lerpFactor = op.isKnockedOut ? 0.45 : 0.25;
+                op.mesh.position.x += (op.targetX - op.mesh.position.x) * lerpFactor;
+                op.mesh.position.y += (op.targetY - op.mesh.position.y) * lerpFactor;
+                op.mesh.position.z += (op.targetZ - op.mesh.position.z) * lerpFactor;
+            }
             op.mesh.rotation.y += (op.targetRotY - op.mesh.rotation.y) * 0.25;
 
             updateCharacterMotion(
