@@ -35,6 +35,7 @@ function createNameSprite(nameText, damage = 0, stock = null) {
 
     const nameObj = {
         sprite,
+        spriteMat,
         texture,
         canvas,
         ctx,
@@ -80,8 +81,18 @@ function renderNameSprite(nameObj) {
         dmgY = 92;
     }
 
-    // プレイヤーネーム
-    ctx.font = 'bold 22px sans-serif';
+    // 【項目9改善】プレイヤーネーム（全角12文字でもプレートからはみ出さない自動縮小フィット）
+    const maxNameWidth = 220;
+    let fontSize = 22;
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    let measured = ctx.measureText(nameObj.currentName).width;
+
+    while (measured > maxNameWidth && fontSize > 13) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        measured = ctx.measureText(nameObj.currentName).width;
+    }
+
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -110,7 +121,6 @@ function updateNameSpriteDamage(nameObj, newDamage) {
     renderNameSprite(nameObj);
 }
 
-// 【改良】残ストックの確実な更新
 function updateNameSpriteStock(nameObj, newStock) {
     if (!nameObj) return;
     nameObj.currentStock = (newStock !== null && newStock !== undefined) ? Number(newStock) : null;

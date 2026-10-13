@@ -23,7 +23,6 @@ let hostId = null;
 let currentMode = 'free';
 let battleStartTime = 0;
 let eliminatedOrder = [];
-// 【重大度C対策】バトル開始時の正規参加者IDをSetで厳密管理
 let battleParticipantIds = new Set();
 
 const playerColors = [
@@ -168,11 +167,9 @@ function forceEndStockBattle(reason = 'manual') {
 function checkStockBattleWinner() {
     if (currentMode !== 'stock_battle') return;
 
-    // バトル参加者かつ現在も接続中のプレイヤーのみを対象とする
     const activeParticipants = Object.values(players).filter(p => battleParticipantIds.has(p.id));
     const alivePlayers = activeParticipants.filter(p => p.stock > 0);
 
-    // 生き残りが1人以下になったら勝敗確定
     if (alivePlayers.length <= 1) {
         const winner = alivePlayers[0] || null;
         const results = [];
@@ -255,7 +252,7 @@ io.on('connection', (socket) => {
         hostId: hostId,
         currentMode: currentMode,
         battleStartTime: battleStartTime,
-        serverNow: Date.now() // 時計差吸収用
+        serverNow: Date.now()
     });
 
     socket.broadcast.emit('newPlayer', players[socket.id]);
@@ -263,7 +260,6 @@ io.on('connection', (socket) => {
 
     socket.on('changeName', (newName) => {
         if (players[socket.id] && typeof newName === 'string') {
-            // サロゲートペア（絵文字）を壊さない文字数制限
             const cleanName = Array.from(newName.trim()).slice(0, 12).join('') || 'NoName';
             players[socket.id].name = cleanName;
             io.emit('playerRenamed', { id: socket.id, name: cleanName });
@@ -290,13 +286,29 @@ io.on('connection', (socket) => {
             p.isInvincible = !!data.isInvincible;
             p.lastMoveAt = Date.now();
 
-            // リスポーン完了判定（足場近くに戻ったらリスポーン中フラグを解除）
             if (p.isRespawning && p.y >= -1.0) {
                 p.isRespawning = false;
             }
 
-            // volatile通信でパケット滞留を低減
-            socket.broadcast.volatile.emit('playerMoved', p);
+            // 【項目8改善】クライアント中継オブジェクトから内部管理用プロパティを省いて帯域最適化
+            socket.broadcast.volatile.emit('playerMoved', {
+                id: p.id,
+                x: p.x,
+                y: p.y,
+                z: p.z,
+                rotationY: p.rotationY,
+                swingAngle: p.swingAngle,
+                isOnGround: p.isOnGround,
+                punchRatio: p.punchRatio,
+                chargeLevel: p.chargeLevel,
+                spinRatio: p.spinRatio,
+                isSpinAttack: p.isSpinAttack,
+                isHoldingSpin: p.isHoldingSpin,
+                holdingCharge: p.holdingCharge,
+                isDiving: p.isDiving,
+                diveRatio: p.diveRatio,
+                isInvincible: p.isInvincible
+            });
         }
     });
 
@@ -341,32 +353,40 @@ io.on('connection', (socket) => {
 
     socket.on('punchHit', (data) => {
         if (!data || typeof data.targetId !== 'string') return;
-        if (data.targetId === socket.id) return; // 自傷防止
+        if (data.targetId === socket.id) return;
+
+        // 【項目7改善】カウントダウン中（開始から3秒以内）の攻撃をサーバーで完全にブロック
+        if (currentMode === 'stock_battle' && Date.now() < (battleStartTime + 3000)) return;
 
         const target = players[data.targetId];
         const attacker = players[socket.id];
         if (!target || !attacker || target.isEliminated || attacker.isEliminated) return;
 
-        // サーバー側無敵検証
         if (target.invincibleUntil > Date.now()) return;
 
-        // 距離検証（最大リーチ8.0m + 余裕を持たせた11.0m以内）
         const dist = Math.hypot(target.x - attacker.x, target.z - attacker.z);
         if (dist > 11.5) return;
 
-        // パラメータのクランプ検証
         const damageDealt = Math.min(35, Math.max(0, Number(data.damageDealt) || 0));
-        const force = Math.min(60, Math.max(0, Number(data.force) || 0));
-        const dirX = Number.isFinite(data.dirX) ? data.dirX : 0;
-        const dirZ = Number.isFinite(data.dirZ) ? data.dirZ : 1;
+
+        // 【項目1改善】dirベクトルの完全正規化 ＆ 蓄積ダメージに応じた理論最大値による動的クランプ
+        const rawDirX = Number.isFinite(data.dirX) ? data.dirX : 0;
+        const rawDirZ = Number.isFinite(data.dirZ) ? data.dirZ : 1;
+        const dirLen = Math.hypot(rawDirX, rawDirZ) || 1.0;
+        const ndx = rawDirX / dirLen;
+        const ndz = rawDirZ / dirLen;
+
+        // 理論最大吹っ飛び力（ドラゴンダイブ/最大溜め回転斬りの大威力）＋余裕15%
+        const maxTheoreticalForce = 18.75 * (1.0 + (target.damage / 80.0) * 1.5) * 1.4 * 1.15;
+        const force = Math.min(maxTheoreticalForce, Math.max(0, Number(data.force) || 0));
 
         target.damage += damageDealt;
 
         io.emit('playerKnocked', {
             targetId: data.targetId,
             attackerId: socket.id,
-            dirX: dirX,
-            dirZ: dirZ,
+            dirX: ndx,
+            dirZ: ndz,
             force: force,
             newDamage: target.damage
         });
@@ -382,7 +402,6 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 【重大度A・F改善】状態フラグ駆動型安全落下・リスポーン処理
     const handleFall = (targetId) => {
         const p = players[targetId];
         if (!p || p.isRespawning) return;
@@ -392,7 +411,7 @@ io.on('connection', (socket) => {
         p.x = 0;
         p.y = 0;
         p.z = 0;
-        p.invincibleUntil = Date.now() + 2000; // サーバー主導2秒間無敵
+        p.invincibleUntil = Date.now() + 2000;
 
         if (currentMode === 'stock_battle' && battleParticipantIds.has(p.id) && !p.isEliminated) {
             p.stock = Math.max(0, p.stock - 1);
@@ -419,7 +438,6 @@ io.on('connection', (socket) => {
 
     socket.on('playerRespawn', () => {
         const p = players[socket.id];
-        // 落下していない状態での虚偽自己申告を排除
         if (!p || p.y > -18.0) return;
         handleFall(socket.id);
     });
@@ -429,7 +447,6 @@ io.on('connection', (socket) => {
         const target = players[data.targetId];
         if (!target || data.targetId === socket.id) return;
 
-        // 本人がアクティブに通信中（500ms以内）なら本人の申告のみを信用し、他者申告は破棄
         if (Date.now() - (target.lastMoveAt || 0) < 500) return;
 
         handleFall(data.targetId);
@@ -438,7 +455,6 @@ io.on('connection', (socket) => {
     socket.on('updateTargetPosition', (data) => {
         if (data && players[data.targetId]) {
             const t = players[data.targetId];
-            // 本人が通信途絶している場合のみ位置上書きを受理
             if (Date.now() - (t.lastMoveAt || 0) >= 500) {
                 if (Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.z)) {
                     t.x = data.x;

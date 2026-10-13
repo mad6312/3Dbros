@@ -29,13 +29,14 @@ dirLight.position.set(30, 50, 30);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.width = 2048;
 dirLight.shadow.mapSize.height = 2048;
-// 【改善】影の投影範囲を60mステージ全体に拡大
 dirLight.shadow.camera.left = -36;
 dirLight.shadow.camera.right = 36;
 dirLight.shadow.camera.top = 36;
 dirLight.shadow.camera.bottom = -36;
 dirLight.shadow.camera.near = 10;
 dirLight.shadow.camera.far = 140;
+// 【項目9改善】影カメラ投影行列の明示的更新
+dirLight.shadow.camera.updateProjectionMatrix();
 scene.add(dirLight);
 
 // --- 3. ステージ（浮島ステージ初期60x60） ---
@@ -64,7 +65,6 @@ const dynamicBlockObjects = [];
 const boxGeo = new THREE.BoxGeometry(2, 2, 2);
 
 function setupInitialBlocks() {
-    // 【重大度N改善】既存ブロックのメモリ解放（dispose）
     dynamicBlockObjects.forEach(b => {
         if (b.mesh) {
             scene.remove(b.mesh);
@@ -137,28 +137,23 @@ function resetStageToInitial() {
     setupInitialBlocks();
 }
 
-// ステージ動的縮小 ＆ ブロック物理落下の更新
+// 【項目2改善】経過時間から毎フレーム連続的に再計算する安全なステージ縮小物理
 function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
-    if (elapsedSeconds >= 180) {
-        const shrinkProgress = Math.min(1.0, (elapsedSeconds - 180) / 180.0);
-        stageSize = DEFAULT_STAGE_SIZE * (1.0 - shrinkProgress);
-        halfStage = stageSize / 2;
+    const shrinkProgress = Math.min(1.0, Math.max(0.0, (elapsedSeconds - 180.0) / 180.0));
+    stageSize = DEFAULT_STAGE_SIZE * (1.0 - shrinkProgress);
+    halfStage = stageSize / 2.0;
 
-        const scaleRatio = Math.max(0.0001, 1.0 - shrinkProgress);
-        floor.scale.set(scaleRatio, 1, scaleRatio);
-        cliff.scale.set(scaleRatio, 1, scaleRatio);
+    const scaleRatio = Math.max(0.0001, 1.0 - shrinkProgress);
+    floor.scale.set(scaleRatio, 1, scaleRatio);
+    cliff.scale.set(scaleRatio, 1, scaleRatio);
 
-        if (shrinkProgress >= 1.0) {
-            stageSize = 0;
-            halfStage = 0;
-            isStageCompletelyGone = true;
-            floor.visible = false;
-            cliff.visible = false;
-        } else {
-            isStageCompletelyGone = false;
-        }
-    } else {
-        isStageCompletelyGone = false;
+    isStageCompletelyGone = (shrinkProgress >= 1.0);
+    floor.visible = !isStageCompletelyGone;
+    cliff.visible = !isStageCompletelyGone;
+
+    if (isStageCompletelyGone) {
+        stageSize = 0;
+        halfStage = 0;
     }
 
     const blockGravity = -26.0;

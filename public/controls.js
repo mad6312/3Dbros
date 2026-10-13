@@ -89,21 +89,11 @@ const Controls = {
         this.initVisibilityHandler();
     },
 
-    // 入力状態の完全クリア（押しっぱなし固着防止）
     clearAllInputs() {
         this.activeKeys = {};
         this.activeMouseButtons = {};
         this.isDragging = false;
         this.cancelPunchCharge();
-    },
-
-    isAnyModalOpen() {
-        const sm = document.getElementById('settings-modal');
-        const km = document.getElementById('keyconfig-modal');
-        const rm = document.getElementById('battle-result-modal');
-        return (sm && sm.style.display === 'block') ||
-            (km && km.style.display === 'block') ||
-            (rm && rm.style.display === 'block');
     },
 
     initVisibilityHandler() {
@@ -154,19 +144,25 @@ const Controls = {
         }
     },
 
+    // 【項目6改善】localStorageが無効・例外時でもゲーム起動を妨げない安全保護
     loadKeyBindings() {
-        const saved = localStorage.getItem('tps_key_bindings');
-        if (saved) {
-            try {
+        try {
+            const saved = localStorage.getItem('tps_key_bindings');
+            if (saved) {
                 this.bindings = Object.assign({}, this.defaultBindings, JSON.parse(saved));
-            } catch (e) {
-                this.bindings = Object.assign({}, this.defaultBindings);
             }
+        } catch (e) {
+            console.warn('localStorageアクセス不可。デフォルトキー設定を使用します:', e);
+            this.bindings = Object.assign({}, this.defaultBindings);
         }
     },
 
     saveKeyBindings() {
-        localStorage.setItem('tps_key_bindings', JSON.stringify(this.bindings));
+        try {
+            localStorage.setItem('tps_key_bindings', JSON.stringify(this.bindings));
+        } catch (e) {
+            console.warn('localStorageへの保存に失敗しました:', e);
+        }
     },
 
     resetToDefaultBindings() {
@@ -283,7 +279,6 @@ const Controls = {
         if (settingsBtn) {
             settingsBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.clearAllInputs();
                 settingsBtn.blur();
                 if (settingsModal) settingsModal.style.display = 'block';
             });
@@ -572,7 +567,9 @@ const Controls = {
         window.addEventListener('contextmenu', (e) => e.preventDefault());
 
         window.addEventListener('keydown', (e) => {
-            if (this.isAnyModalOpen()) return;
+            // 【項目3改善】名前入力などのインプット要素にフォーカスがあるときだけ文字キー移動を抑止
+            if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+            if (this.isKeyConfigOpen) return;
             this.activeKeys[e.code] = true;
         });
 
@@ -580,15 +577,15 @@ const Controls = {
             this.activeKeys[e.code] = false;
         });
 
-        // UIクリック時のパンチ暴発・誤ドラッグ防止ガード
         window.addEventListener('mousedown', (e) => {
+            // UIクリック時のパンチ誤爆・視点ドラッグ暴発防止（canvas外クリックは完全無視）
             if (e.target && e.target.tagName !== 'CANVAS') return;
-            if (this.isAnyModalOpen()) return;
+            if (this.isKeyConfigOpen) return;
 
             this.activeMouseButtons[e.button] = true;
 
             const lookBtn = Number(this.bindings.lookDrag !== undefined ? this.bindings.lookDrag : 2);
-            if (!this.isKeyConfigOpen && (e.button === lookBtn || e.button === 2)) {
+            if (e.button === lookBtn || e.button === 2) {
                 this.isDragging = true;
                 this.previousMousePosition = { x: e.clientX, y: e.clientY };
             }
@@ -600,7 +597,7 @@ const Controls = {
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (!this.isDragging || this.isKeyConfigOpen || this.isAnyModalOpen()) return;
+            if (!this.isDragging || this.isKeyConfigOpen) return;
 
             const deltaX = e.clientX - this.previousMousePosition.x;
             const deltaY = e.clientY - this.previousMousePosition.y;
@@ -616,7 +613,7 @@ const Controls = {
         });
 
         window.addEventListener('wheel', (e) => {
-            if (this.isKeyConfigOpen || this.isAnyModalOpen()) return;
+            if (this.isKeyConfigOpen) return;
             this.cameraDistance += e.deltaY * 0.008;
             this.cameraDistance = Math.max(this.minDistance, Math.min(this.maxDistance, this.cameraDistance));
         }, { passive: true });
@@ -717,7 +714,6 @@ const Controls = {
     },
 
     getInputs(delta) {
-        // スキルCT進行
         if (this.spinStacks < this.spinMaxStacks) {
             this.spinCooldownTimer -= delta;
             if (this.spinCooldownTimer <= 0) {
@@ -771,11 +767,10 @@ const Controls = {
             }
         }
 
-        // ゲームパッド視点操作
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
         const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
 
-        if (gp && !this.isKeyConfigOpen && !this.isAnyModalOpen()) {
+        if (gp && !this.isKeyConfigOpen) {
             const lookAxes = this.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
             const isZoomHolding = this.isPadButtonPressed(gp, this.bindings.padZoom);
             const stickRX = this.applyDeadzone(lookAxes[0]);
@@ -800,7 +795,6 @@ const Controls = {
             }
         }
 
-        // カメラスムージング
         if (this.antiSickness) {
             const smoothFactor = Math.min(1.0, 14.0 * delta);
             this.currentYaw += (this.targetYaw - this.currentYaw) * smoothFactor;
@@ -810,7 +804,6 @@ const Controls = {
             this.currentPitch = this.targetPitch;
         }
 
-        // ジャンプキーの押下状態（カウントダウン中も状態追跡してGO直後の誤作動を抑止）
         let isJumpKeyCurrentlyHeld = this.isKeyOrCombinationPressed(this.bindings.jump);
         let isPadJumpCurrentlyHeld = false;
         if (gp) {
@@ -818,7 +811,8 @@ const Controls = {
         }
         const isJumpAnyHeld = isJumpKeyCurrentlyHeld || isPadJumpCurrentlyHeld;
 
-        if (this.isKeyConfigOpen || this.isAnyModalOpen()) {
+        // 【項目3改善】仕様書11-2通り、完全遮断は「キーコンフィグ画面」のみ
+        if (this.isKeyConfigOpen) {
             this.prevJumpHeld = isJumpAnyHeld;
             this.cancelPunchCharge();
             return {
@@ -841,10 +835,14 @@ const Controls = {
         let inputX = 0;
         let inputZ = 0;
 
-        if (this.isKeyOrCombinationPressed(this.bindings.forward)) inputZ += 1;
-        if (this.isKeyOrCombinationPressed(this.bindings.backward)) inputZ -= 1;
-        if (this.isKeyOrCombinationPressed(this.bindings.left)) inputX -= 1;
-        if (this.isKeyOrCombinationPressed(this.bindings.right)) inputX += 1;
+        // 名前入力欄フォーカス中は移動キーを拾わない
+        const isTyping = document.activeElement && document.activeElement.tagName === 'INPUT';
+        if (!isTyping) {
+            if (this.isKeyOrCombinationPressed(this.bindings.forward)) inputZ += 1;
+            if (this.isKeyOrCombinationPressed(this.bindings.backward)) inputZ -= 1;
+            if (this.isKeyOrCombinationPressed(this.bindings.left)) inputX -= 1;
+            if (this.isKeyOrCombinationPressed(this.bindings.right)) inputX += 1;
+        }
 
         let isDashRequested = this.isKeyOrCombinationPressed(this.bindings.dash);
         let isPunchKeyPressed = this.isKeyOrCombinationPressed(this.bindings.punch);
@@ -868,11 +866,9 @@ const Controls = {
             if (this.isPadButtonPressed(gp, this.bindings.padDive)) isPadDivePressed = true;
         }
 
-        // 押された瞬間のみ true になる単発ジャンプ判定
         const jumpJustTriggered = isJumpAnyHeld && !this.prevJumpHeld;
         this.prevJumpHeld = isJumpAnyHeld;
 
-        // ダッシュスタミナ
         const hasMovement = Math.hypot(inputX, inputZ) > 0.05;
         let isDashing = false;
 

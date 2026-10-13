@@ -15,7 +15,6 @@ scene.add(playerGroup);
 const otherPlayers = {};
 
 let ignoreEffectsUntilTimestamp = 0;
-// 【重大度G改善】サーバー・端末間の時計差補正オフセット
 let serverTimeOffset = 0;
 
 Controls.init(
@@ -43,13 +42,14 @@ let currentBattleStartTime = 0;
 const socket = (typeof io !== 'undefined') ? io() : {
     on: () => { },
     emit: () => { },
+    volatile: { emit: () => { } },
     connected: false
 };
 
 const serverStatus = document.getElementById('server-status');
 let myId = null;
 
-// キャラクターリソースの安全な破棄（メモリリーク対策）
+// キャラクターリソースの完全な破棄（SpriteMaterial含むメモリリーク防止）
 function disposePlayerCharacter(op) {
     if (!op || !op.mesh) return;
     scene.remove(op.mesh);
@@ -62,8 +62,10 @@ function disposePlayerCharacter(op) {
             }
         });
     }
-    if (op.nameObj && op.nameObj.texture) {
-        op.nameObj.texture.dispose();
+    // 【項目9改善】スプライト用マテリアル・テクスチャの明示的解放
+    if (op.nameObj) {
+        if (op.nameObj.spriteMat) op.nameObj.spriteMat.dispose();
+        if (op.nameObj.texture) op.nameObj.texture.dispose();
     }
 }
 
@@ -89,15 +91,13 @@ socket.on('init', (data) => {
     currentBattleStartTime = data.battleStartTime || 0;
     serverTimeOffset = (data.serverNow || Date.now()) - Date.now();
 
-    // 【重大度D改善】再接続時の二重化防止：既存の他プレイヤーメッシュを全破棄
     for (let id in otherPlayers) {
         disposePlayerCharacter(otherPlayers[id]);
         delete otherPlayers[id];
     }
 
-    if (currentRoomMode === 'free') {
-        resetStageToInitial();
-    }
+    // 【項目2改善】モードを問わずステージを初期復元（縮小は毎フレーム経過時間から再計算される）
+    resetStageToInitial();
 
     const myData = data.players[myId];
     if (myData) {
@@ -118,10 +118,16 @@ socket.on('init', (data) => {
         const nameInput = document.getElementById('player-name-input');
         if (nameInput) nameInput.value = myName;
 
-        if (myData.isEliminated) {
-            Controls.isEliminated = true;
-            setCharacterGhostMode(myCharacter, true);
-        }
+        // 【項目2改善】再接続時の脱落フラグ同期、無敵・ノックバック・速度の確実な初期化
+        Controls.isEliminated = !!myData.isEliminated;
+        setCharacterGhostMode(myCharacter, Controls.isEliminated);
+        myInvincibleTimer = 0;
+        isKnockedBack = false;
+        isDiving = false;
+        divePhase = 'idle';
+        velocityX = 0;
+        velocityZ = 0;
+        yVelocity = 0;
     }
 
     for (let id in data.players) {
@@ -216,7 +222,6 @@ socket.on('battleStarted', (data) => {
     currentBattleStartTime = data.battleStartTime || Date.now();
     serverTimeOffset = (data.serverNow || Date.now()) - Date.now();
 
-    // 【重大度H改善】バトル開始時に確実に初期ステージへ復元
     resetStageToInitial();
 
     Controls.isEliminated = false;
@@ -369,7 +374,6 @@ socket.on('battleFinished', (data) => {
 
     listContainer.innerHTML = '';
 
-    // 【重大度K改善】innerHTMLの直接展開を排除しtextContentで安全にDOM構築（XSS防止）
     if (data.isForceEnd) {
         headerTitle.textContent = '⏹️ BATTLE ENDED (強制終了)';
         winnerTitle.textContent = (data.reason === 'low_players') ? '人数が1人以下になったため終了しました' : 'ホストによりバトルが終了されました';
@@ -419,9 +423,10 @@ socket.on('battleFinished', (data) => {
     resultModal.style.display = 'block';
 });
 
+// 【項目5改善】サーバー確定判定に従い、クライアント手元の無敵タイマーによる弾きを削除（脱落チェックのみ維持）
 socket.on('playerKnocked', (data) => {
     if (data.targetId === myId) {
-        if (myInvincibleTimer > 0 || Controls.isEliminated) return;
+        if (Controls.isEliminated) return;
 
         myDamage = data.newDamage;
         updateNameSpriteDamage(myCharacter.nameObj, myDamage);
@@ -436,7 +441,7 @@ socket.on('playerKnocked', (data) => {
         isOnGround = false;
     } else if (otherPlayers[data.targetId]) {
         const op = otherPlayers[data.targetId];
-        if (op.invincibleTimer > 0 || op.isEliminated) return;
+        if (op.isEliminated) return;
 
         op.damage = data.newDamage;
         updateNameSpriteDamage(op.nameObj, op.damage);
@@ -527,7 +532,6 @@ socket.on('syncSelf', (serverData) => {
     isKnockedBack = false;
 });
 
-// 非アクティブからの復帰処理
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
         ignoreEffectsUntilTimestamp = Date.now() + 350;
@@ -662,7 +666,6 @@ function animate() {
             }
         }
 
-        // サーバー時計オフセットを反映したステージ縮小更新
         if (currentRoomMode === 'stock_battle' && currentBattleStartTime > 0) {
             const currentSyncedNow = Date.now() + serverTimeOffset;
             const elapsedSeconds = (currentSyncedNow - currentBattleStartTime) / 1000.0;
@@ -874,6 +877,8 @@ function animate() {
 
         // 場外落下判定
         if (playerGroup.position.y < -25) {
+            const fellY = playerGroup.position.y;
+
             playerGroup.position.set(0, 0, 0);
             unstickFromObstacles(playerGroup.position);
 
@@ -888,6 +893,27 @@ function animate() {
 
             myDamage = 0;
             updateNameSpriteDamage(myCharacter.nameObj, 0);
+
+            // 【項目4改善】テレポート前に落下位置（y < -25）をサーバーに確実に送信してから申告
+            if (socket.volatile) {
+                socket.volatile.emit('playerMove', {
+                    x: playerGroup.position.x,
+                    y: fellY,
+                    z: playerGroup.position.z,
+                    rotationY: playerGroup.rotation.y,
+                    swingAngle: 0,
+                    isOnGround: false,
+                    punchRatio: 0,
+                    chargeLevel: 0,
+                    isSpinAttack: false,
+                    spinRatio: 0,
+                    isHoldingSpin: false,
+                    holdingCharge: 0,
+                    isDiving: false,
+                    diveRatio: 0,
+                    isInvincible: false
+                });
+            }
             socket.emit('playerRespawn');
         }
 
@@ -1095,8 +1121,9 @@ function animate() {
             );
         }
 
+        // 【項目8改善】クライアント→サーバーのplayerMoveをvolatile送信にして遅延・滞留を抑制
         if (myId && time - lastSendTime > 33) {
-            socket.emit('playerMove', {
+            const moveData = {
                 x: playerGroup.position.x,
                 y: playerGroup.position.y,
                 z: playerGroup.position.z,
@@ -1112,7 +1139,13 @@ function animate() {
                 isDiving: isDiving,
                 diveRatio: currentDiveRatio,
                 isInvincible: myInvincibleTimer > 0
-            });
+            };
+
+            if (socket.volatile) {
+                socket.volatile.emit('playerMove', moveData);
+            } else {
+                socket.emit('playerMove', moveData);
+            }
             lastSendTime = time;
         }
 
