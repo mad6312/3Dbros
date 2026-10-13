@@ -20,7 +20,7 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// --- 2. ライトの設定 ---
+// --- 2. ライトの設定（60mステージ全体をカバーする影カメラ設定） ---
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(ambientLight);
 
@@ -29,13 +29,20 @@ dirLight.position.set(30, 50, 30);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.width = 2048;
 dirLight.shadow.mapSize.height = 2048;
+// 【改善】影の投影範囲を60mステージ全体に拡大
+dirLight.shadow.camera.left = -36;
+dirLight.shadow.camera.right = 36;
+dirLight.shadow.camera.top = 36;
+dirLight.shadow.camera.bottom = -36;
+dirLight.shadow.camera.near = 10;
+dirLight.shadow.camera.far = 140;
 scene.add(dirLight);
 
 // --- 3. ステージ（浮島ステージ初期60x60） ---
 const DEFAULT_STAGE_SIZE = 60.0;
 let stageSize = DEFAULT_STAGE_SIZE;
 let halfStage = stageSize / 2; // 30m
-let isStageCompletelyGone = false; // 【新機能】完全消滅フラグ
+let isStageCompletelyGone = false;
 
 const floorGeo = new THREE.BoxGeometry(DEFAULT_STAGE_SIZE, 2, DEFAULT_STAGE_SIZE);
 const floorMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
@@ -57,8 +64,12 @@ const dynamicBlockObjects = [];
 const boxGeo = new THREE.BoxGeometry(2, 2, 2);
 
 function setupInitialBlocks() {
+    // 【重大度N改善】既存ブロックのメモリ解放（dispose）
     dynamicBlockObjects.forEach(b => {
-        if (b.mesh) scene.remove(b.mesh);
+        if (b.mesh) {
+            scene.remove(b.mesh);
+            if (b.mesh.material) b.mesh.material.dispose();
+        }
     });
     dynamicBlockObjects.length = 0;
     obstacles.length = 0;
@@ -116,7 +127,7 @@ setupInitialBlocks();
 function resetStageToInitial() {
     stageSize = DEFAULT_STAGE_SIZE;
     halfStage = stageSize / 2;
-    isStageCompletelyGone = false; // フラグ解除
+    isStageCompletelyGone = false;
 
     floor.scale.set(1, 1, 1);
     floor.visible = true;
@@ -129,7 +140,7 @@ function resetStageToInitial() {
 // ステージ動的縮小 ＆ ブロック物理落下の更新
 function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
     if (elapsedSeconds >= 180) {
-        const shrinkProgress = Math.min(1.0, (elapsedSeconds - 180) / 180.0); // 0.0 -> 1.0
+        const shrinkProgress = Math.min(1.0, (elapsedSeconds - 180) / 180.0);
         stageSize = DEFAULT_STAGE_SIZE * (1.0 - shrinkProgress);
         halfStage = stageSize / 2;
 
@@ -137,7 +148,6 @@ function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
         floor.scale.set(scaleRatio, 1, scaleRatio);
         cliff.scale.set(scaleRatio, 1, scaleRatio);
 
-        // 【重要】360秒経過して完全消滅した場合、足場判定を物理的にもゼロにする
         if (shrinkProgress >= 1.0) {
             stageSize = 0;
             halfStage = 0;
@@ -156,7 +166,6 @@ function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
         if (b.isDestroyed) continue;
 
         if (!b.isFalling) {
-            // ステージが完全消滅したか、重心が外にはみ出たら落下
             if (isStageCompletelyGone || Math.abs(b.x) > halfStage || Math.abs(b.z) > halfStage) {
                 b.isFalling = true;
             }
@@ -175,6 +184,7 @@ function updateStageShrinkAndPhysics(elapsedSeconds, delta) {
             if (b.y < -25) {
                 b.isDestroyed = true;
                 scene.remove(b.mesh);
+                if (b.mesh.material) b.mesh.material.dispose();
                 const obsIdx = obstacles.indexOf(b.obsData);
                 if (obsIdx !== -1) obstacles.splice(obsIdx, 1);
             }
@@ -267,6 +277,8 @@ function updateShockwaves(delta) {
             sw.ringMesh.material.opacity = Math.max(0, 0.95 * (1.0 - lingerProgress));
         } else {
             scene.remove(sw.group);
+            sw.domeMesh.material.dispose();
+            sw.ringMesh.material.dispose();
             activeShockwaves.splice(i, 1);
         }
     }

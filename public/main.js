@@ -15,6 +15,8 @@ scene.add(playerGroup);
 const otherPlayers = {};
 
 let ignoreEffectsUntilTimestamp = 0;
+// 【重大度G改善】サーバー・端末間の時計差補正オフセット
+let serverTimeOffset = 0;
 
 Controls.init(
     (newName) => {
@@ -47,6 +49,24 @@ const socket = (typeof io !== 'undefined') ? io() : {
 const serverStatus = document.getElementById('server-status');
 let myId = null;
 
+// キャラクターリソースの安全な破棄（メモリリーク対策）
+function disposePlayerCharacter(op) {
+    if (!op || !op.mesh) return;
+    scene.remove(op.mesh);
+    if (op.charObj && op.charObj.allMeshes) {
+        op.charObj.allMeshes.forEach(m => {
+            if (m.geometry) m.geometry.dispose();
+            if (m.material) {
+                if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
+                else m.material.dispose();
+            }
+        });
+    }
+    if (op.nameObj && op.nameObj.texture) {
+        op.nameObj.texture.dispose();
+    }
+}
+
 socket.on('connect', () => {
     myId = socket.id;
     if (serverStatus) {
@@ -67,6 +87,17 @@ socket.on('init', (data) => {
     currentHostId = data.hostId;
     currentRoomMode = data.currentMode;
     currentBattleStartTime = data.battleStartTime || 0;
+    serverTimeOffset = (data.serverNow || Date.now()) - Date.now();
+
+    // 【重大度D改善】再接続時の二重化防止：既存の他プレイヤーメッシュを全破棄
+    for (let id in otherPlayers) {
+        disposePlayerCharacter(otherPlayers[id]);
+        delete otherPlayers[id];
+    }
+
+    if (currentRoomMode === 'free') {
+        resetStageToInitial();
+    }
 
     const myData = data.players[myId];
     if (myData) {
@@ -131,7 +162,11 @@ function updateHostButtonUI(playerCount = null) {
 }
 
 socket.on('newPlayer', (playerData) => {
-    if (playerData.id !== myId && !otherPlayers[playerData.id]) {
+    if (playerData.id !== myId) {
+        if (otherPlayers[playerData.id]) {
+            disposePlayerCharacter(otherPlayers[playerData.id]);
+            delete otherPlayers[playerData.id];
+        }
         addOtherPlayer(playerData);
     }
     updateHostButtonUI();
@@ -179,6 +214,11 @@ socket.on('playerMoved', (data) => {
 socket.on('battleStarted', (data) => {
     currentRoomMode = 'stock_battle';
     currentBattleStartTime = data.battleStartTime || Date.now();
+    serverTimeOffset = (data.serverNow || Date.now()) - Date.now();
+
+    // 【重大度H改善】バトル開始時に確実に初期ステージへ復元
+    resetStageToInitial();
+
     Controls.isEliminated = false;
     setCharacterGhostMode(myCharacter, false);
 
@@ -216,6 +256,7 @@ socket.on('battleStarted', (data) => {
             op.targetY = 0;
             op.targetZ = pData.z;
             op.mesh.position.set(pData.x, 0, pData.z);
+            op.hasReportedFall = false;
             updateNameSpriteDamage(op.nameObj, 0);
             updateNameSpriteStock(op.nameObj, 3);
             setCharacterGhostMode(op.charObj, false);
@@ -313,6 +354,7 @@ socket.on('battleFinished', (data) => {
         op.isEliminated = false;
         op.mesh.visible = true;
         op.invincibleTimer = 0;
+        op.hasReportedFall = false;
         updateNameSpriteStock(op.nameObj, null);
         updateNameSpriteDamage(op.nameObj, 0);
         setCharacterGhostMode(op.charObj, false);
@@ -327,6 +369,7 @@ socket.on('battleFinished', (data) => {
 
     listContainer.innerHTML = '';
 
+    // 【重大度K改善】innerHTMLの直接展開を排除しtextContentで安全にDOM構築（XSS防止）
     if (data.isForceEnd) {
         headerTitle.textContent = '⏹️ BATTLE ENDED (強制終了)';
         winnerTitle.textContent = (data.reason === 'low_players') ? '人数が1人以下になったため終了しました' : 'ホストによりバトルが終了されました';
@@ -334,7 +377,16 @@ socket.on('battleFinished', (data) => {
         data.results.forEach(res => {
             const row = document.createElement('div');
             row.className = 'result-row';
-            row.innerHTML = `<span>${res.name}</span><span class="result-heart-txt">${res.heartDisplay}</span>`;
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = res.name;
+
+            const heartSpan = document.createElement('span');
+            heartSpan.className = 'result-heart-txt';
+            heartSpan.textContent = res.heartDisplay;
+
+            row.appendChild(nameSpan);
+            row.appendChild(heartSpan);
             listContainer.appendChild(row);
         });
     } else {
@@ -345,9 +397,21 @@ socket.on('battleFinished', (data) => {
         data.results.forEach(res => {
             const row = document.createElement('div');
             row.className = `result-row ${res.rank === 1 ? 'rank-1' : ''}`;
+
             const rankLabel = res.rank === 1 ? '👑 1位' : `${res.rank}位`;
-            const stockLabel = (res.rank === 1 && res.stock > 0) ? `<span class="result-heart-txt">${res.heartDisplay}</span>` : '脱落';
-            row.innerHTML = `<span>${rankLabel}: ${res.name}</span><span>${stockLabel}</span>`;
+            const labelSpan = document.createElement('span');
+            labelSpan.textContent = `${rankLabel}: ${res.name}`;
+
+            const statusSpan = document.createElement('span');
+            if (res.rank === 1 && res.stock > 0) {
+                statusSpan.className = 'result-heart-txt';
+                statusSpan.textContent = res.heartDisplay;
+            } else {
+                statusSpan.textContent = '脱落';
+            }
+
+            row.appendChild(labelSpan);
+            row.appendChild(statusSpan);
             listContainer.appendChild(row);
         });
     }
@@ -427,6 +491,7 @@ socket.on('playerForceRespawned', (data) => {
         op.kbVZ = 0;
         op.isKnockedOut = false;
         op.isOnGround = true;
+        op.hasReportedFall = false;
 
         if (!data.isEliminated && !op.isEliminated) {
             op.invincibleTimer = 2.0;
@@ -462,14 +527,13 @@ socket.on('syncSelf', (serverData) => {
     isKnockedBack = false;
 });
 
+// 非アクティブからの復帰処理
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
         ignoreEffectsUntilTimestamp = Date.now() + 350;
         prevTime = performance.now();
 
-        if (isDiving) {
-            isDiving = false;
-        }
+        if (isDiving) isDiving = false;
         if (isPunching) isPunching = false;
         if (isSpinAttack) isSpinAttack = false;
         Controls.cancelPunchCharge();
@@ -478,14 +542,9 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-window.addEventListener('focus', () => {
-    prevTime = performance.now();
-    if (socket.connected) socket.emit('requestSync');
-});
-
 socket.on('playerDisconnected', (id) => {
     if (otherPlayers[id]) {
-        scene.remove(otherPlayers[id].mesh);
+        disposePlayerCharacter(otherPlayers[id]);
         delete otherPlayers[id];
     }
     updateHostButtonUI();
@@ -550,7 +609,6 @@ const SPIN_TOTAL_TIME = 0.36;
 let spinChargeLevel = 0;
 const hitTargetsThisSpin = new Set();
 
-// 【新仕様：確実な物理駆動ドラゴンダイブ】
 let isDiving = false;
 let divePhase = 'idle';
 let diveTimer = 0;
@@ -604,8 +662,10 @@ function animate() {
             }
         }
 
+        // サーバー時計オフセットを反映したステージ縮小更新
         if (currentRoomMode === 'stock_battle' && currentBattleStartTime > 0) {
-            const elapsedSeconds = (Date.now() - currentBattleStartTime) / 1000.0;
+            const currentSyncedNow = Date.now() + serverTimeOffset;
+            const elapsedSeconds = (currentSyncedNow - currentBattleStartTime) / 1000.0;
             updateStageShrinkAndPhysics(elapsedSeconds, delta);
         }
 
@@ -658,9 +718,6 @@ function animate() {
         const baseSpeed = 11.0;
         let currentMaxSpeed = input.isDashing ? baseSpeed * 1.3 : baseSpeed;
 
-        // =======================================================
-        // 【ドラゴンダイブ急降下＆ブロック確実着地処理】
-        // =======================================================
         if (isDiving) {
             diveTimer += delta;
             const totalDiveTime = DIVE_RISE_DURATION + DIVE_FALL_DURATION;
@@ -696,12 +753,10 @@ function animate() {
                 const isOverStage = !isStageCompletelyGone && (Math.abs(playerGroup.position.x) <= halfStage && Math.abs(playerGroup.position.z) <= halfStage);
                 let highestGroundY = isOverStage ? 0 : -9999;
 
-                // 【改善】ブロックの上面を通過（スイープ）したかを判定し、確実に上面に着地
                 for (let obs of obstacles) {
                     const collideX = (playerGroup.position.x + PLAYER_RADIUS > obs.minX) && (playerGroup.position.x - PLAYER_RADIUS < obs.maxX);
                     const collideZ = (playerGroup.position.z + PLAYER_RADIUS > obs.minZ) && (playerGroup.position.z - PLAYER_RADIUS < obs.maxZ);
                     if (collideX && collideZ) {
-                        // 前フレームがブロック上面より上（または上面付近）にあり、降下によって上面を跨ぐ場合
                         if (prevY >= (obs.maxY - 0.4) && nextY <= obs.maxY) {
                             if (obs.maxY > highestGroundY) {
                                 highestGroundY = obs.maxY;
@@ -711,7 +766,6 @@ function animate() {
                 }
 
                 if (nextY <= highestGroundY) {
-                    // 地面またはブロック上面に着地成功
                     playerGroup.position.y = highestGroundY;
                     isDiving = false;
                     divePhase = 'idle';
@@ -722,7 +776,6 @@ function animate() {
                     isOnGround = true;
                     triggerShockwaveExplosion(playerGroup.position, otherPlayers, socket, Controls.isEliminated);
                 } else if (!isOverStage && nextY < 0) {
-                    // ステージ外なら着地せず奈落へ直滑降
                     playerGroup.position.y = nextY;
                     isDiving = false;
                     divePhase = 'idle';
@@ -734,7 +787,6 @@ function animate() {
                 }
             }
         } else {
-            // 通常移動計算
             const inputMagnitude = Math.hypot(input.inputX, input.inputZ);
             const hasInput = inputMagnitude > 0.05;
 
@@ -820,7 +872,7 @@ function animate() {
             }
         }
 
-        // 場外落下
+        // 場外落下判定
         if (playerGroup.position.y < -25) {
             playerGroup.position.set(0, 0, 0);
             unstickFromObstacles(playerGroup.position);
@@ -848,7 +900,6 @@ function animate() {
             currentSwingAngle *= 0.8;
         }
 
-        // パンチ進行
         if (isPunching) {
             punchTimer -= delta;
             currentPunchRatio = Math.max(0, Math.min(1.0, 1.0 - (punchTimer / PUNCH_TOTAL_TIME)));
@@ -866,7 +917,6 @@ function animate() {
             currentPunchRatio = 0;
         }
 
-        // 回転斬り進行
         if (isSpinAttack) {
             spinTimer -= delta;
             currentSpinRatio = Math.max(0, Math.min(1.0, 1.0 - (spinTimer / SPIN_TOTAL_TIME)));
@@ -899,11 +949,9 @@ function animate() {
 
         updateShockwaves(delta);
 
-        // カメラ更新
         const targetPos = new THREE.Vector3(playerGroup.position.x, playerGroup.position.y + 1.0, playerGroup.position.z);
         Controls.updateCamera(camera, targetPos, currentSpeed, currentMaxSpeed, delta);
 
-        // 他プレイヤー処理
         const nowMs = Date.now();
         for (let id in otherPlayers) {
             const op = otherPlayers[id];
@@ -960,7 +1008,6 @@ function animate() {
                 op.mesh.visible = true;
             }
 
-            // 非アクティブ（裏画面）時の相手物理シミュレーション
             if (op.isKnockedOut) {
                 const opPos = { x: op.targetX, y: op.targetY, z: op.targetZ };
                 const opMoved = moveWithCollision(opPos, op.kbVX, op.kbVZ, delta, true);
@@ -1012,7 +1059,6 @@ function animate() {
                     op.isOnGround = false;
                 }
 
-                // 相手が通信途絶している場合のみ、攻撃側が撃墜をサーバーへ通知
                 if (op.targetY < -25 && !op.hasReportedFall && (nowMs - op.lastPacketTime > 600)) {
                     op.hasReportedFall = true;
                     op.isKnockedOut = false;

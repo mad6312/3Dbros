@@ -40,10 +40,9 @@ const Controls = {
     isCountdownActive: false,
     isEliminated: false,
 
-    // 【新機能】ジャンプの単発判定用フラグ（長押し連続ジャンプ防止）
+    // 単発ジャンプ判定用
     prevJumpHeld: false,
 
-    // 【新機能】タブ非アクティブ時間の計測用
     lastHiddenTimestamp: 0,
 
     activeKeys: {},
@@ -90,14 +89,30 @@ const Controls = {
         this.initVisibilityHandler();
     },
 
-    // 【新機能】タブが裏画面にいた時間を計測し、復帰時にスタミナ回復＆スキルCTを進める
+    // 入力状態の完全クリア（押しっぱなし固着防止）
+    clearAllInputs() {
+        this.activeKeys = {};
+        this.activeMouseButtons = {};
+        this.isDragging = false;
+        this.cancelPunchCharge();
+    },
+
+    isAnyModalOpen() {
+        const sm = document.getElementById('settings-modal');
+        const km = document.getElementById('keyconfig-modal');
+        const rm = document.getElementById('battle-result-modal');
+        return (sm && sm.style.display === 'block') ||
+            (km && km.style.display === 'block') ||
+            (rm && rm.style.display === 'block');
+    },
+
     initVisibilityHandler() {
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
-                // 非アクティブになった時刻を記録
                 this.lastHiddenTimestamp = Date.now();
+                this.clearAllInputs();
             } else {
-                // アクティブに復帰した時、経過した秒数を一括適用！
+                this.clearAllInputs();
                 if (this.lastHiddenTimestamp > 0) {
                     const elapsedSeconds = (Date.now() - this.lastHiddenTimestamp) / 1000.0;
                     this.applyCatchupTime(elapsedSeconds);
@@ -105,24 +120,24 @@ const Controls = {
                 }
             }
         });
+
+        window.addEventListener('blur', () => {
+            this.clearAllInputs();
+        });
     },
 
-    // 非アクティブ時間のスタミナ回復・CT短縮一括処理
     applyCatchupTime(seconds) {
         if (seconds <= 0) return;
 
-        // スタミナの回復（秒速5%回復）
         this.dashStamina = Math.min(100.0, this.dashStamina + 5.0 * seconds);
         if (this.isExhausted && this.dashStamina >= 20.0) {
             this.isExhausted = false;
         }
 
-        // スキルCT短縮（ドラゴンダイブ）
         if (this.diveCooldownTimer > 0) {
             this.diveCooldownTimer = Math.max(0, this.diveCooldownTimer - seconds);
         }
 
-        // スキルCT短縮（回転斬りスタック回復）
         let remainingTime = seconds;
         while (this.spinStacks < this.spinMaxStacks && remainingTime > 0) {
             if (this.spinCooldownTimer <= 0) {
@@ -268,6 +283,7 @@ const Controls = {
         if (settingsBtn) {
             settingsBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                this.clearAllInputs();
                 settingsBtn.blur();
                 if (settingsModal) settingsModal.style.display = 'block';
             });
@@ -285,6 +301,7 @@ const Controls = {
                 e.stopPropagation();
                 openKeyconfigBtn.blur();
                 this.isKeyConfigOpen = true;
+                this.clearAllInputs();
                 this.updateKeyConfigUI();
                 if (keyconfigModal) keyconfigModal.style.display = 'block';
             });
@@ -555,6 +572,7 @@ const Controls = {
         window.addEventListener('contextmenu', (e) => e.preventDefault());
 
         window.addEventListener('keydown', (e) => {
+            if (this.isAnyModalOpen()) return;
             this.activeKeys[e.code] = true;
         });
 
@@ -562,7 +580,11 @@ const Controls = {
             this.activeKeys[e.code] = false;
         });
 
+        // UIクリック時のパンチ暴発・誤ドラッグ防止ガード
         window.addEventListener('mousedown', (e) => {
+            if (e.target && e.target.tagName !== 'CANVAS') return;
+            if (this.isAnyModalOpen()) return;
+
             this.activeMouseButtons[e.button] = true;
 
             const lookBtn = Number(this.bindings.lookDrag !== undefined ? this.bindings.lookDrag : 2);
@@ -578,7 +600,7 @@ const Controls = {
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (!this.isDragging || this.isKeyConfigOpen) return;
+            if (!this.isDragging || this.isKeyConfigOpen || this.isAnyModalOpen()) return;
 
             const deltaX = e.clientX - this.previousMousePosition.x;
             const deltaY = e.clientY - this.previousMousePosition.y;
@@ -594,7 +616,7 @@ const Controls = {
         });
 
         window.addEventListener('wheel', (e) => {
-            if (this.isKeyConfigOpen) return;
+            if (this.isKeyConfigOpen || this.isAnyModalOpen()) return;
             this.cameraDistance += e.deltaY * 0.008;
             this.cameraDistance = Math.max(this.minDistance, Math.min(this.maxDistance, this.cameraDistance));
         }, { passive: true });
@@ -753,7 +775,7 @@ const Controls = {
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
         const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
 
-        if (gp) {
+        if (gp && !this.isKeyConfigOpen && !this.isAnyModalOpen()) {
             const lookAxes = this.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
             const isZoomHolding = this.isPadButtonPressed(gp, this.bindings.padZoom);
             const stickRX = this.applyDeadzone(lookAxes[0]);
@@ -788,7 +810,16 @@ const Controls = {
             this.currentPitch = this.targetPitch;
         }
 
-        if (this.isKeyConfigOpen) {
+        // ジャンプキーの押下状態（カウントダウン中も状態追跡してGO直後の誤作動を抑止）
+        let isJumpKeyCurrentlyHeld = this.isKeyOrCombinationPressed(this.bindings.jump);
+        let isPadJumpCurrentlyHeld = false;
+        if (gp) {
+            if (this.isPadButtonPressed(gp, this.bindings.padJump)) isPadJumpCurrentlyHeld = true;
+        }
+        const isJumpAnyHeld = isJumpKeyCurrentlyHeld || isPadJumpCurrentlyHeld;
+
+        if (this.isKeyConfigOpen || this.isAnyModalOpen()) {
+            this.prevJumpHeld = isJumpAnyHeld;
             this.cancelPunchCharge();
             return {
                 inputX: 0, inputZ: 0, jump: false, isDashing: false,
@@ -798,6 +829,7 @@ const Controls = {
         }
 
         if (this.isCountdownActive) {
+            this.prevJumpHeld = isJumpAnyHeld;
             this.cancelPunchCharge();
             return {
                 inputX: 0, inputZ: 0, jump: false, isDashing: false,
@@ -813,10 +845,6 @@ const Controls = {
         if (this.isKeyOrCombinationPressed(this.bindings.backward)) inputZ -= 1;
         if (this.isKeyOrCombinationPressed(this.bindings.left)) inputX -= 1;
         if (this.isKeyOrCombinationPressed(this.bindings.right)) inputX += 1;
-
-        // 【修正点】ジャンプの単発トリガー化（長押し連続ジャンプを完全に防止！）
-        let isJumpKeyCurrentlyHeld = this.isKeyOrCombinationPressed(this.bindings.jump);
-        let isPadJumpCurrentlyHeld = false;
 
         let isDashRequested = this.isKeyOrCombinationPressed(this.bindings.dash);
         let isPunchKeyPressed = this.isKeyOrCombinationPressed(this.bindings.punch);
@@ -834,15 +862,13 @@ const Controls = {
             if (stickLX !== 0) inputX = stickLX;
             if (stickLY !== 0) inputZ = -stickLY;
 
-            if (this.isPadButtonPressed(gp, this.bindings.padJump)) isPadJumpCurrentlyHeld = true;
             if (this.isPadButtonPressed(gp, this.bindings.padDash)) isDashRequested = true;
             if (this.isPadButtonPressed(gp, this.bindings.padPunch)) isPadPunchPressed = true;
             if (this.isPadButtonPressed(gp, this.bindings.padSpin)) isPadSpinPressed = true;
             if (this.isPadButtonPressed(gp, this.bindings.padDive)) isPadDivePressed = true;
         }
 
-        // 押された瞬間のみ true になるジャンプ判定
-        const isJumpAnyHeld = isJumpKeyCurrentlyHeld || isPadJumpCurrentlyHeld;
+        // 押された瞬間のみ true になる単発ジャンプ判定
         const jumpJustTriggered = isJumpAnyHeld && !this.prevJumpHeld;
         this.prevJumpHeld = isJumpAnyHeld;
 
@@ -933,7 +959,7 @@ const Controls = {
         return {
             inputX,
             inputZ,
-            jump: jumpJustTriggered, // 単発トリガーとして返す
+            jump: jumpJustTriggered,
             isDashing,
             attackTriggered,
             attackType: triggeredAttackType,

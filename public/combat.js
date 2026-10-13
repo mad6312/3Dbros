@@ -7,17 +7,14 @@ const PLAYER_HEIGHT = 1.9;
 
 // --- 1. 障害物＆動的絶壁コライダー衝突判定 ---
 function checkObstacleCollision(px, py, pz) {
-    // 1. 各ボックス障害物との当たり判定（落下中のブロックも含む）
     for (let obs of obstacles) {
         const collideX = px + PLAYER_RADIUS > obs.minX && px - PLAYER_RADIUS < obs.maxX;
         const collideZ = pz + PLAYER_RADIUS > obs.minZ && pz - PLAYER_RADIUS < obs.maxZ;
-        // 足元がブロック上面より少しでも上にある場合は側面壁として衝突させない
         const collideY = py < (obs.maxY - 0.05) && (py + PLAYER_HEIGHT) > obs.minY;
 
         if (collideX && collideZ && collideY) return obs;
     }
 
-    // 2. ステージ側面（崖の絶壁）の当たり判定（動的に縮小する halfStage にリアルタイム連動）
     if (py < 0 && py > -25) {
         const inCliffX = px + PLAYER_RADIUS > -halfStage && px - PLAYER_RADIUS < halfStage;
         const inCliffZ = pz + PLAYER_RADIUS > -halfStage && pz - PLAYER_RADIUS < halfStage;
@@ -30,14 +27,12 @@ function unstickFromObstacles(pos) {
     for (let obs of obstacles) {
         const collideX = pos.x + PLAYER_RADIUS > obs.minX && pos.x - PLAYER_RADIUS < obs.maxX;
         const collideZ = pos.z + PLAYER_RADIUS > obs.minZ && pos.z - PLAYER_RADIUS < obs.maxZ;
-        // 上面に乗っている時は押し出さない
         const collideY = pos.y < (obs.maxY - 0.05) && (pos.y + PLAYER_HEIGHT) > obs.minY;
 
         if (collideX && collideZ && collideY) {
             const dLeft = Math.abs((pos.x + PLAYER_RADIUS) - obs.minX);
             const dRight = Math.abs(obs.maxX - (pos.x - PLAYER_RADIUS));
             const dBack = Math.abs((pos.z + PLAYER_RADIUS) - obs.minZ);
-            // 【重要バグ修正】playerRadius を 正しい定数名 PLAYER_RADIUS に修正
             const dFront = Math.abs(obs.maxZ - (pos.z - PLAYER_RADIUS));
             const minPush = Math.min(dLeft, dRight, dBack, dFront);
 
@@ -173,7 +168,9 @@ function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, other
             const dz = targetPos.z - myPos.z;
             const targetAngle = Math.atan2(dx, dz);
 
-            let angleDiff = (targetAngle - currentArmAngle + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+            // 【重大度I改善】Math.atan2を用いた完全な角度差正規化（無限カメラ回転時の破綻を防止）
+            const rawDiff = targetAngle - currentArmAngle;
+            const angleDiff = Math.atan2(Math.sin(rawDiff), Math.cos(rawDiff));
 
             if (Math.abs(angleDiff) < 0.65 || currentSpinRatio > 0.85) {
                 hitTargetsThisSpin.add(id);
@@ -186,12 +183,14 @@ function checkSpinSweepHit(myPos, rotY, spinChargeLevel, currentSpinRatio, other
                 const chargeMult = 1.0 + spinChargeLevel * 0.4;
                 const finalForce = 18.75 * damageScaling * chargeMult;
 
-                const pushDir = new THREE.Vector3(dx, 0, dz).normalize();
+                const pushDist = Math.hypot(dx, dz);
+                const pushDirX = pushDist > 0.001 ? dx / pushDist : Math.sin(rotY);
+                const pushDirZ = pushDist > 0.001 ? dz / pushDist : Math.cos(rotY);
 
                 socket.emit('punchHit', {
                     targetId: id,
-                    dirX: pushDir.x,
-                    dirZ: pushDir.z,
+                    dirX: pushDirX,
+                    dirZ: pushDirZ,
                     force: finalForce,
                     damageDealt: finalDamage
                 });
@@ -223,14 +222,25 @@ function triggerShockwaveExplosion(myPos, otherPlayers, socket, myIsEliminated =
             const damageScaling = 1.0 + (targetDamage / 80.0) * 1.5;
             const finalForce = 18.75 * damageScaling * 1.4;
 
-            const pushDir = new THREE.Vector3().subVectors(targetPos, myPos);
-            if (pushDir.length() < 0.1) pushDir.set(0, 1, 0);
-            pushDir.normalize();
+            // 【重大度J改善】水平方向のみで正規化し、高低差による吹っ飛び威力減衰を完全に解消
+            const hx = targetPos.x - myPos.x;
+            const hz = targetPos.z - myPos.z;
+            const hDist = Math.hypot(hx, hz);
+
+            let pushDirX, pushDirZ;
+            if (hDist > 0.05) {
+                pushDirX = hx / hDist;
+                pushDirZ = hz / hDist;
+            } else {
+                const randAngle = Math.random() * Math.PI * 2;
+                pushDirX = Math.sin(randAngle);
+                pushDirZ = Math.cos(randAngle);
+            }
 
             socket.emit('punchHit', {
                 targetId: id,
-                dirX: pushDir.x,
-                dirZ: pushDir.z,
+                dirX: pushDirX,
+                dirZ: pushDirZ,
                 force: finalForce,
                 damageDealt: finalDamage
             });

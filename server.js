@@ -23,6 +23,8 @@ let hostId = null;
 let currentMode = 'free';
 let battleStartTime = 0;
 let eliminatedOrder = [];
+// 【重大度C対策】バトル開始時の正規参加者IDをSetで厳密管理
+let battleParticipantIds = new Set();
 
 const playerColors = [
     0x3366ff, 0xff3344, 0x33cc66, 0xff9900,
@@ -129,25 +131,29 @@ function updateRoomInfo() {
 function resetAllPlayersToFreeMode() {
     currentMode = 'free';
     battleStartTime = 0;
+    battleParticipantIds.clear();
 
     Object.values(players).forEach(p => {
         p.stock = 3;
         p.damage = 0;
         p.isEliminated = false;
         p.joinedMidBattle = false;
-        p.lastFallTime = 0;
+        p.isRespawning = false;
+        p.invincibleUntil = 0;
     });
 }
 
 function forceEndStockBattle(reason = 'manual') {
     if (currentMode !== 'stock_battle') return;
 
-    const results = Object.values(players).map(p => ({
-        id: p.id,
-        name: p.name,
-        stock: p.stock,
-        heartDisplay: formatStockToHearts(p.stock)
-    }));
+    const results = Object.values(players)
+        .filter(p => battleParticipantIds.has(p.id))
+        .map(p => ({
+            id: p.id,
+            name: p.name,
+            stock: p.stock,
+            heartDisplay: formatStockToHearts(p.stock)
+        }));
 
     resetAllPlayersToFreeMode();
 
@@ -162,13 +168,15 @@ function forceEndStockBattle(reason = 'manual') {
 function checkStockBattleWinner() {
     if (currentMode !== 'stock_battle') return;
 
-    const participants = Object.values(players).filter(p => !p.joinedMidBattle);
-    const alivePlayers = participants.filter(p => p.stock > 0);
+    // バトル参加者かつ現在も接続中のプレイヤーのみを対象とする
+    const activeParticipants = Object.values(players).filter(p => battleParticipantIds.has(p.id));
+    const alivePlayers = activeParticipants.filter(p => p.stock > 0);
 
-    if (alivePlayers.length <= 1 && participants.length >= 2) {
+    // 生き残りが1人以下になったら勝敗確定
+    if (alivePlayers.length <= 1) {
         const winner = alivePlayers[0] || null;
-
         const results = [];
+
         if (winner) {
             results.push({
                 rank: 1,
@@ -180,8 +188,9 @@ function checkStockBattleWinner() {
             });
         }
 
-        eliminatedOrder.reverse().forEach((elId) => {
-            if (players[elId] && elId !== (winner ? winner.id : null)) {
+        const reversedEliminated = [...eliminatedOrder].reverse();
+        reversedEliminated.forEach((elId) => {
+            if (players[elId] && (!winner || elId !== winner.id) && battleParticipantIds.has(elId)) {
                 results.push({
                     rank: results.length + 1,
                     id: elId,
@@ -222,7 +231,11 @@ io.on('connection', (socket) => {
         swingAngle: 0,
         isOnGround: true,
         punchRatio: 0,
+        chargeLevel: 0,
         spinRatio: 0,
+        isSpinAttack: false,
+        isHoldingSpin: false,
+        holdingCharge: 0,
         isDiving: false,
         diveRatio: 0,
         armScaleZ: 1.0,
@@ -231,7 +244,9 @@ io.on('connection', (socket) => {
         stock: isMidJoin ? 0 : 3,
         isEliminated: isMidJoin,
         joinedMidBattle: isMidJoin,
-        lastFallTime: 0
+        isRespawning: false,
+        invincibleUntil: 0,
+        lastMoveAt: Date.now()
     };
 
     socket.emit('init', {
@@ -239,7 +254,8 @@ io.on('connection', (socket) => {
         players: players,
         hostId: hostId,
         currentMode: currentMode,
-        battleStartTime: battleStartTime
+        battleStartTime: battleStartTime,
+        serverNow: Date.now() // 時計差吸収用
     });
 
     socket.broadcast.emit('newPlayer', players[socket.id]);
@@ -247,40 +263,53 @@ io.on('connection', (socket) => {
 
     socket.on('changeName', (newName) => {
         if (players[socket.id] && typeof newName === 'string') {
-            const cleanName = newName.trim().substring(0, 12) || 'NoName';
+            // サロゲートペア（絵文字）を壊さない文字数制限
+            const cleanName = Array.from(newName.trim()).slice(0, 12).join('') || 'NoName';
             players[socket.id].name = cleanName;
             io.emit('playerRenamed', { id: socket.id, name: cleanName });
         }
     });
 
     socket.on('playerMove', (data) => {
-        if (players[socket.id]) {
-            players[socket.id].x = data.x;
-            players[socket.id].y = data.y;
-            players[socket.id].z = data.z;
-            players[socket.id].rotationY = data.rotationY;
-            players[socket.id].swingAngle = data.swingAngle;
-            players[socket.id].isOnGround = data.isOnGround;
-            players[socket.id].punchRatio = data.punchRatio;
-            players[socket.id].spinRatio = data.spinRatio || 0;
-            players[socket.id].chargeLevel = data.chargeLevel || 0;
-            players[socket.id].isSpinAttack = data.isSpinAttack || false;
-            players[socket.id].isDiving = data.isDiving || false;
-            players[socket.id].diveRatio = data.diveRatio || 0;
-            players[socket.id].isInvincible = data.isInvincible || false;
+        const p = players[socket.id];
+        if (p && data && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.z)) {
+            p.x = data.x;
+            p.y = data.y;
+            p.z = data.z;
+            p.rotationY = Number.isFinite(data.rotationY) ? data.rotationY : 0;
+            p.swingAngle = Number.isFinite(data.swingAngle) ? data.swingAngle : 0;
+            p.isOnGround = !!data.isOnGround;
+            p.punchRatio = Number.isFinite(data.punchRatio) ? data.punchRatio : 0;
+            p.chargeLevel = Number.isFinite(data.chargeLevel) ? data.chargeLevel : 0;
+            p.spinRatio = Number.isFinite(data.spinRatio) ? data.spinRatio : 0;
+            p.isSpinAttack = !!data.isSpinAttack;
+            p.isHoldingSpin = !!data.isHoldingSpin;
+            p.holdingCharge = Number.isFinite(data.holdingCharge) ? data.holdingCharge : 0;
+            p.isDiving = !!data.isDiving;
+            p.diveRatio = Number.isFinite(data.diveRatio) ? data.diveRatio : 0;
+            p.isInvincible = !!data.isInvincible;
+            p.lastMoveAt = Date.now();
 
-            socket.broadcast.emit('playerMoved', players[socket.id]);
+            // リスポーン完了判定（足場近くに戻ったらリスポーン中フラグを解除）
+            if (p.isRespawning && p.y >= -1.0) {
+                p.isRespawning = false;
+            }
+
+            // volatile通信でパケット滞留を低減
+            socket.broadcast.volatile.emit('playerMoved', p);
         }
     });
 
     socket.on('startStockBattle', () => {
-        if (socket.id !== hostId || Object.keys(players).length < 2) return;
+        if (socket.id !== hostId || currentMode !== 'free') return;
+        if (Object.keys(players).length < 2) return;
 
         currentMode = 'stock_battle';
         battleStartTime = Date.now();
         eliminatedOrder = [];
+        battleParticipantIds = new Set(Object.keys(players));
 
-        const ids = Object.keys(players);
+        const ids = Array.from(battleParticipantIds);
         const spawns = generateBattleSpawnPositions(ids.length);
 
         ids.forEach((id, idx) => {
@@ -289,7 +318,8 @@ io.on('connection', (socket) => {
             p.damage = 0;
             p.isEliminated = false;
             p.joinedMidBattle = false;
-            p.lastFallTime = 0;
+            p.isRespawning = false;
+            p.invincibleUntil = 0;
             p.x = spawns[idx].x;
             p.y = 0;
             p.z = spawns[idx].z;
@@ -298,7 +328,8 @@ io.on('connection', (socket) => {
         io.emit('battleStarted', {
             players: players,
             countdown: 3,
-            battleStartTime: battleStartTime
+            battleStartTime: battleStartTime,
+            serverNow: Date.now()
         });
         updateRoomInfo();
     });
@@ -309,23 +340,40 @@ io.on('connection', (socket) => {
     });
 
     socket.on('punchHit', (data) => {
+        if (!data || typeof data.targetId !== 'string') return;
+        if (data.targetId === socket.id) return; // 自傷防止
+
         const target = players[data.targetId];
         const attacker = players[socket.id];
         if (!target || !attacker || target.isEliminated || attacker.isEliminated) return;
 
-        target.damage += data.damageDealt;
+        // サーバー側無敵検証
+        if (target.invincibleUntil > Date.now()) return;
+
+        // 距離検証（最大リーチ8.0m + 余裕を持たせた11.0m以内）
+        const dist = Math.hypot(target.x - attacker.x, target.z - attacker.z);
+        if (dist > 11.5) return;
+
+        // パラメータのクランプ検証
+        const damageDealt = Math.min(35, Math.max(0, Number(data.damageDealt) || 0));
+        const force = Math.min(60, Math.max(0, Number(data.force) || 0));
+        const dirX = Number.isFinite(data.dirX) ? data.dirX : 0;
+        const dirZ = Number.isFinite(data.dirZ) ? data.dirZ : 1;
+
+        target.damage += damageDealt;
 
         io.emit('playerKnocked', {
             targetId: data.targetId,
             attackerId: socket.id,
-            dirX: data.dirX,
-            dirZ: data.dirZ,
-            force: data.force,
+            dirX: dirX,
+            dirZ: dirZ,
+            force: force,
             newDamage: target.damage
         });
     });
 
     socket.on('spawnShockwave', (data) => {
+        if (!data || !Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.z)) return;
         socket.broadcast.emit('shockwaveSpawned', {
             x: data.x,
             y: data.y,
@@ -334,23 +382,19 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 【重要改善】二重落下判定ガード（同一落下イベントを1.5秒間クールダウンしストック二重減少を完全防止）
+    // 【重大度A・F改善】状態フラグ駆動型安全落下・リスポーン処理
     const handleFall = (targetId) => {
         const p = players[targetId];
-        if (!p) return;
+        if (!p || p.isRespawning) return;
 
-        const now = Date.now();
-        if (p.lastFallTime && (now - p.lastFallTime < 1500)) {
-            return; // 1.5秒以内の重複通知は破棄
-        }
-        p.lastFallTime = now;
-
+        p.isRespawning = true;
         p.damage = 0;
         p.x = 0;
         p.y = 0;
         p.z = 0;
+        p.invincibleUntil = Date.now() + 2000; // サーバー主導2秒間無敵
 
-        if (currentMode === 'stock_battle' && !p.isEliminated) {
+        if (currentMode === 'stock_battle' && battleParticipantIds.has(p.id) && !p.isEliminated) {
             p.stock = Math.max(0, p.stock - 1);
 
             if (p.stock === 0) {
@@ -374,18 +418,34 @@ io.on('connection', (socket) => {
     };
 
     socket.on('playerRespawn', () => {
+        const p = players[socket.id];
+        // 落下していない状態での虚偽自己申告を排除
+        if (!p || p.y > -18.0) return;
         handleFall(socket.id);
     });
 
     socket.on('targetFellOut', (data) => {
+        if (!data || !data.targetId) return;
+        const target = players[data.targetId];
+        if (!target || data.targetId === socket.id) return;
+
+        // 本人がアクティブに通信中（500ms以内）なら本人の申告のみを信用し、他者申告は破棄
+        if (Date.now() - (target.lastMoveAt || 0) < 500) return;
+
         handleFall(data.targetId);
     });
 
     socket.on('updateTargetPosition', (data) => {
-        if (players[data.targetId]) {
-            players[data.targetId].x = data.x;
-            players[data.targetId].y = data.y;
-            players[data.targetId].z = data.z;
+        if (data && players[data.targetId]) {
+            const t = players[data.targetId];
+            // 本人が通信途絶している場合のみ位置上書きを受理
+            if (Date.now() - (t.lastMoveAt || 0) >= 500) {
+                if (Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.z)) {
+                    t.x = data.x;
+                    t.y = data.y;
+                    t.z = data.z;
+                }
+            }
         }
     });
 
@@ -406,10 +466,13 @@ io.on('connection', (socket) => {
         io.emit('playerDisconnected', socket.id);
         updateRoomInfo();
 
-        if (currentMode === 'stock_battle' && Object.keys(players).length <= 1) {
-            forceEndStockBattle('low_players');
-        } else {
-            checkStockBattleWinner();
+        if (currentMode === 'stock_battle') {
+            const activeParticipants = Object.values(players).filter(p => battleParticipantIds.has(p.id));
+            if (activeParticipants.length <= 1) {
+                forceEndStockBattle('low_players');
+            } else {
+                checkStockBattleWinner();
+            }
         }
     });
 });
