@@ -138,6 +138,7 @@ function resetAllPlayersToFreeMode() {
         p.isEliminated = false;
         p.joinedMidBattle = false;
         p.isRespawning = false;
+        p.respawnedAt = 0;
         p.invincibleUntil = 0;
     });
 }
@@ -242,8 +243,11 @@ io.on('connection', (socket) => {
         isEliminated: isMidJoin,
         joinedMidBattle: isMidJoin,
         isRespawning: false,
+        respawnedAt: 0,
         invincibleUntil: 0,
-        lastMoveAt: Date.now()
+        lastMoveAt: Date.now(),
+        lastPunchHitAt: 0,
+        lastShockwaveAt: 0
     };
 
     socket.emit('init', {
@@ -286,11 +290,11 @@ io.on('connection', (socket) => {
             p.isInvincible = !!data.isInvincible;
             p.lastMoveAt = Date.now();
 
+            // 本人パケットによりリスポーン完了を解除
             if (p.isRespawning && p.y >= -1.0) {
                 p.isRespawning = false;
             }
 
-            // 【項目8改善】クライアント中継オブジェクトから内部管理用プロパティを省いて帯域最適化
             socket.broadcast.volatile.emit('playerMoved', {
                 id: p.id,
                 x: p.x,
@@ -331,6 +335,7 @@ io.on('connection', (socket) => {
             p.isEliminated = false;
             p.joinedMidBattle = false;
             p.isRespawning = false;
+            p.respawnedAt = 0;
             p.invincibleUntil = 0;
             p.x = spawns[idx].x;
             p.y = 0;
@@ -355,28 +360,30 @@ io.on('connection', (socket) => {
         if (!data || typeof data.targetId !== 'string') return;
         if (data.targetId === socket.id) return;
 
-        // 【項目7改善】カウントダウン中（開始から3秒以内）の攻撃をサーバーで完全にブロック
-        if (currentMode === 'stock_battle' && Date.now() < (battleStartTime + 3000)) return;
+        // レート制限（1プレイヤーあたり最低50ms間隔）
+        const now = Date.now();
+        const attacker = players[socket.id];
+        if (!attacker || (now - (attacker.lastPunchHitAt || 0) < 50)) return;
+        attacker.lastPunchHitAt = now;
+
+        if (currentMode === 'stock_battle' && now < (battleStartTime + 3000)) return;
 
         const target = players[data.targetId];
-        const attacker = players[socket.id];
-        if (!target || !attacker || target.isEliminated || attacker.isEliminated) return;
+        if (!target || target.isEliminated || attacker.isEliminated) return;
 
-        if (target.invincibleUntil > Date.now()) return;
+        if (target.invincibleUntil > now) return;
 
         const dist = Math.hypot(target.x - attacker.x, target.z - attacker.z);
         if (dist > 11.5) return;
 
         const damageDealt = Math.min(35, Math.max(0, Number(data.damageDealt) || 0));
 
-        // 【項目1改善】dirベクトルの完全正規化 ＆ 蓄積ダメージに応じた理論最大値による動的クランプ
         const rawDirX = Number.isFinite(data.dirX) ? data.dirX : 0;
         const rawDirZ = Number.isFinite(data.dirZ) ? data.dirZ : 1;
         const dirLen = Math.hypot(rawDirX, rawDirZ) || 1.0;
         const ndx = rawDirX / dirLen;
         const ndz = rawDirZ / dirLen;
 
-        // 理論最大吹っ飛び力（ドラゴンダイブ/最大溜め回転斬りの大威力）＋余裕15%
         const maxTheoreticalForce = 18.75 * (1.0 + (target.damage / 80.0) * 1.5) * 1.4 * 1.15;
         const force = Math.min(maxTheoreticalForce, Math.max(0, Number(data.force) || 0));
 
@@ -394,24 +401,53 @@ io.on('connection', (socket) => {
 
     socket.on('spawnShockwave', (data) => {
         if (!data || !Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.z)) return;
+        const now = Date.now();
+        const p = players[socket.id];
+        if (!p || (now - (p.lastShockwaveAt || 0) < 300)) return;
+        p.lastShockwaveAt = now;
+
         socket.broadcast.emit('shockwaveSpawned', {
             x: data.x,
             y: data.y,
             z: data.z,
-            timestamp: Date.now()
+            timestamp: now
         });
     });
 
-    const handleFall = (targetId) => {
+    // 【重要改善 4.1】非アクティブ時のラッチ時間失効 ＆ 重複時の確定復帰同期
+    const handleFall = (targetId, reporterSocket = null) => {
         const p = players[targetId];
-        if (!p || p.isRespawning) return;
+        if (!p) return;
+        const now = Date.now();
+
+        if (p.isRespawning) {
+            // 復帰後に本人のパケットが届いておらず、かつ前回復帰から1秒以上経過していれば失効
+            const noPacketSinceRespawn = (p.lastMoveAt || 0) <= (p.respawnedAt || 0);
+            const expired = noPacketSinceRespawn && (now - (p.respawnedAt || 0) > 1000);
+
+            if (!expired) {
+                // 重複申告時：申告者の画面に確定復帰位置を再通知し、相手の「消失」を防止
+                if (reporterSocket) {
+                    reporterSocket.emit('playerForceRespawned', {
+                        id: p.id,
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                        damage: 0,
+                        isEliminated: p.isEliminated
+                    });
+                }
+                return;
+            }
+        }
 
         p.isRespawning = true;
+        p.respawnedAt = now;
         p.damage = 0;
         p.x = 0;
         p.y = 0;
         p.z = 0;
-        p.invincibleUntil = Date.now() + 2000;
+        p.invincibleUntil = now + 2000;
 
         if (currentMode === 'stock_battle' && battleParticipantIds.has(p.id) && !p.isEliminated) {
             p.stock = Math.max(0, p.stock - 1);
@@ -439,7 +475,7 @@ io.on('connection', (socket) => {
     socket.on('playerRespawn', () => {
         const p = players[socket.id];
         if (!p || p.y > -18.0) return;
-        handleFall(socket.id);
+        handleFall(socket.id, socket);
     });
 
     socket.on('targetFellOut', (data) => {
@@ -447,9 +483,10 @@ io.on('connection', (socket) => {
         const target = players[data.targetId];
         if (!target || data.targetId === socket.id) return;
 
+        // 本人がアクティブに通信中（500ms以内）なら本人の申告を優先
         if (Date.now() - (target.lastMoveAt || 0) < 500) return;
 
-        handleFall(data.targetId);
+        handleFall(data.targetId, socket);
     });
 
     socket.on('updateTargetPosition', (data) => {

@@ -49,7 +49,6 @@ const socket = (typeof io !== 'undefined') ? io() : {
 const serverStatus = document.getElementById('server-status');
 let myId = null;
 
-// キャラクターリソースの完全な破棄（SpriteMaterial含むメモリリーク防止）
 function disposePlayerCharacter(op) {
     if (!op || !op.mesh) return;
     scene.remove(op.mesh);
@@ -62,7 +61,6 @@ function disposePlayerCharacter(op) {
             }
         });
     }
-    // 【項目9改善】スプライト用マテリアル・テクスチャの明示的解放
     if (op.nameObj) {
         if (op.nameObj.spriteMat) op.nameObj.spriteMat.dispose();
         if (op.nameObj.texture) op.nameObj.texture.dispose();
@@ -96,7 +94,6 @@ socket.on('init', (data) => {
         delete otherPlayers[id];
     }
 
-    // 【項目2改善】モードを問わずステージを初期復元（縮小は毎フレーム経過時間から再計算される）
     resetStageToInitial();
 
     const myData = data.players[myId];
@@ -118,7 +115,6 @@ socket.on('init', (data) => {
         const nameInput = document.getElementById('player-name-input');
         if (nameInput) nameInput.value = myName;
 
-        // 【項目2改善】再接続時の脱落フラグ同期、無敵・ノックバック・速度の確実な初期化
         Controls.isEliminated = !!myData.isEliminated;
         setCharacterGhostMode(myCharacter, Controls.isEliminated);
         myInvincibleTimer = 0;
@@ -262,6 +258,7 @@ socket.on('battleStarted', (data) => {
             op.targetZ = pData.z;
             op.mesh.position.set(pData.x, 0, pData.z);
             op.hasReportedFall = false;
+            op.fallReportedAt = 0;
             updateNameSpriteDamage(op.nameObj, 0);
             updateNameSpriteStock(op.nameObj, 3);
             setCharacterGhostMode(op.charObj, false);
@@ -360,6 +357,7 @@ socket.on('battleFinished', (data) => {
         op.mesh.visible = true;
         op.invincibleTimer = 0;
         op.hasReportedFall = false;
+        op.fallReportedAt = 0;
         updateNameSpriteStock(op.nameObj, null);
         updateNameSpriteDamage(op.nameObj, 0);
         setCharacterGhostMode(op.charObj, false);
@@ -423,7 +421,6 @@ socket.on('battleFinished', (data) => {
     resultModal.style.display = 'block';
 });
 
-// 【項目5改善】サーバー確定判定に従い、クライアント手元の無敵タイマーによる弾きを削除（脱落チェックのみ維持）
 socket.on('playerKnocked', (data) => {
     if (data.targetId === myId) {
         if (Controls.isEliminated) return;
@@ -454,6 +451,7 @@ socket.on('playerKnocked', (data) => {
         op.isAttacker = (data.attackerId === myId);
         op.hasReportedSettlement = false;
         op.hasReportedFall = false;
+        op.fallReportedAt = 0;
     }
 });
 
@@ -497,6 +495,7 @@ socket.on('playerForceRespawned', (data) => {
         op.isKnockedOut = false;
         op.isOnGround = true;
         op.hasReportedFall = false;
+        op.fallReportedAt = 0;
 
         if (!data.isEliminated && !op.isEliminated) {
             op.invincibleTimer = 2.0;
@@ -532,10 +531,16 @@ socket.on('syncSelf', (serverData) => {
     isKnockedBack = false;
 });
 
+// 【5.2 b改善】非アクティブ復帰時に古いノックバック速度をクリア
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
         ignoreEffectsUntilTimestamp = Date.now() + 350;
         prevTime = performance.now();
+
+        velocityX = 0;
+        velocityZ = 0;
+        yVelocity = 0;
+        isKnockedBack = false;
 
         if (isDiving) isDiving = false;
         if (isPunching) isPunching = false;
@@ -595,6 +600,7 @@ function addOtherPlayer(data) {
         isAttacker: false,
         hasReportedSettlement: false,
         hasReportedFall: false,
+        fallReportedAt: 0,
         invincibleTimer: 0,
         lastPacketTime: Date.now()
     };
@@ -877,7 +883,10 @@ function animate() {
 
         // 場外落下判定
         if (playerGroup.position.y < -25) {
+            // 【5.2 a改善】テレポート前の実際の落下座標を確実に保持
+            const fellX = playerGroup.position.x;
             const fellY = playerGroup.position.y;
+            const fellZ = playerGroup.position.z;
 
             playerGroup.position.set(0, 0, 0);
             unstickFromObstacles(playerGroup.position);
@@ -894,26 +903,24 @@ function animate() {
             myDamage = 0;
             updateNameSpriteDamage(myCharacter.nameObj, 0);
 
-            // 【項目4改善】テレポート前に落下位置（y < -25）をサーバーに確実に送信してから申告
-            if (socket.volatile) {
-                socket.volatile.emit('playerMove', {
-                    x: playerGroup.position.x,
-                    y: fellY,
-                    z: playerGroup.position.z,
-                    rotationY: playerGroup.rotation.y,
-                    swingAngle: 0,
-                    isOnGround: false,
-                    punchRatio: 0,
-                    chargeLevel: 0,
-                    isSpinAttack: false,
-                    spinRatio: 0,
-                    isHoldingSpin: false,
-                    holdingCharge: 0,
-                    isDiving: false,
-                    diveRatio: 0,
-                    isInvincible: false
-                });
-            }
+            // 【5.2 a改善】通常のsocket.emitで落下位置を確実に先送りし、その直後に申告
+            socket.emit('playerMove', {
+                x: fellX,
+                y: fellY,
+                z: fellZ,
+                rotationY: playerGroup.rotation.y,
+                swingAngle: 0,
+                isOnGround: false,
+                punchRatio: 0,
+                chargeLevel: 0,
+                isSpinAttack: false,
+                spinRatio: 0,
+                isHoldingSpin: false,
+                holdingCharge: 0,
+                isDiving: false,
+                diveRatio: 0,
+                isInvincible: false
+            });
             socket.emit('playerRespawn');
         }
 
@@ -1007,6 +1014,8 @@ function animate() {
                 }
             }
 
+            // 【4.2改善】非アクティブ相手の通常落下検出（1.5秒経過で再申告を再武装し、消失を防止）
+            const canReportNormal = !op.hasReportedFall || (nowMs - (op.fallReportedAt || 0) > 1500);
             if (!op.isKnockedOut && (nowMs - op.lastPacketTime > 400) && op.targetY > opFloorY) {
                 op.targetY += gravity * delta;
                 if (op.targetY <= opFloorY) {
@@ -1016,8 +1025,9 @@ function animate() {
                     op.isOnGround = false;
                 }
 
-                if (op.targetY < -25 && !op.hasReportedFall) {
+                if (op.targetY < -25 && canReportNormal) {
                     op.hasReportedFall = true;
+                    op.fallReportedAt = nowMs;
                     socket.emit('targetFellOut', { targetId: id });
                 }
             }
@@ -1085,8 +1095,11 @@ function animate() {
                     op.isOnGround = false;
                 }
 
-                if (op.targetY < -25 && !op.hasReportedFall && (nowMs - op.lastPacketTime > 600)) {
+                // 【4.2改善】非アクティブ相手のノックバック落下検出（1.5秒経過で再申告を再武装）
+                const canReportKnock = !op.hasReportedFall || (nowMs - (op.fallReportedAt || 0) > 1500);
+                if (op.targetY < -25 && canReportKnock && (nowMs - op.lastPacketTime > 600)) {
                     op.hasReportedFall = true;
+                    op.fallReportedAt = nowMs;
                     op.isKnockedOut = false;
                     op.kbVX = 0;
                     op.kbVY = 0;
@@ -1121,7 +1134,6 @@ function animate() {
             );
         }
 
-        // 【項目8改善】クライアント→サーバーのplayerMoveをvolatile送信にして遅延・滞留を抑制
         if (myId && time - lastSendTime > 33) {
             const moveData = {
                 x: playerGroup.position.x,
