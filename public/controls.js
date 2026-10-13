@@ -1,5 +1,5 @@
 // =======================================================
-// モジュール2: 操作・UI・キーコンフィグ・非アクティブ時間管理
+// モジュール2: 操作入力・スタミナ/スキルCT・カメラ制御・環境設定
 // =======================================================
 
 const Controls = {
@@ -47,43 +47,9 @@ const Controls = {
 
     activeKeys: {},
     activeMouseButtons: {},
-    activeListeningCleanup: null,
-    isKeyConfigOpen: false,
-
-    padButtonNames: {
-        0: '×', 1: '○', 2: '□', 3: '△',
-        4: 'L1', 5: 'R1', 6: 'L2', 7: 'R2',
-        8: 'SHARE', 9: 'OPTIONS', 10: 'L3', 11: 'R3',
-        12: '↑', 13: '↓', 14: '←', 15: '→', 16: 'PS', 17: 'タッチパッド'
-    },
-
-    defaultBindings: {
-        forward: 'KeyW',
-        backward: 'KeyS',
-        left: 'KeyA',
-        right: 'KeyD',
-        dash: 'ShiftLeft',
-        jump: 'Space',
-        punch: 'Mouse0',
-        spinKey: 'KeyE',
-        diveKey: 'KeyR',
-        lookDrag: 2,
-
-        padPunch: 2,
-        padSpin: '6+2',
-        padDive: 1,
-        padDash: 0,
-        padJump: 3,
-        padZoom: 4,
-        padMoveStick: 'left',
-        padLookStick: 'right'
-    },
-
-    bindings: {},
 
     init(onNameChangeCallback, onHostBattleToggle, onReturnToFree) {
-        this.bindings = Object.assign({}, this.defaultBindings);
-        this.loadKeyBindings();
+        KeyConfig.init();
         this.initUI(onNameChangeCallback, onHostBattleToggle, onReturnToFree);
         this.initEventListeners();
         this.initVisibilityHandler();
@@ -144,72 +110,6 @@ const Controls = {
         }
     },
 
-    // 【項目6改善】localStorageが無効・例外時でもゲーム起動を妨げない安全保護
-    loadKeyBindings() {
-        try {
-            const saved = localStorage.getItem('tps_key_bindings');
-            if (saved) {
-                this.bindings = Object.assign({}, this.defaultBindings, JSON.parse(saved));
-            }
-        } catch (e) {
-            console.warn('localStorageアクセス不可。デフォルトキー設定を使用します:', e);
-            this.bindings = Object.assign({}, this.defaultBindings);
-        }
-    },
-
-    saveKeyBindings() {
-        try {
-            localStorage.setItem('tps_key_bindings', JSON.stringify(this.bindings));
-        } catch (e) {
-            console.warn('localStorageへの保存に失敗しました:', e);
-        }
-    },
-
-    resetToDefaultBindings() {
-        this.bindings = Object.assign({}, this.defaultBindings);
-        this.saveKeyBindings();
-        this.updateKeyConfigUI();
-    },
-
-    cancelCurrentListening() {
-        if (this.activeListeningCleanup) {
-            this.activeListeningCleanup();
-            this.activeListeningCleanup = null;
-        }
-        this.updateKeyConfigUI();
-    },
-
-    formatPadButtonText(bindingVal) {
-        if (bindingVal === undefined || bindingVal === null) return '未設定';
-        const strVal = String(bindingVal);
-        if (strVal.includes('+')) {
-            const parts = strVal.split('+').map(Number);
-            const name1 = this.padButtonNames[parts[0]] || `Btn${parts[0]}`;
-            const name2 = this.padButtonNames[parts[1]] || `Btn${parts[1]}`;
-            return `Button ${parts[0]} (${name1}) ＋ Button ${parts[1]} (${name2})`;
-        } else {
-            const btnIdx = Number(strVal);
-            const name = this.padButtonNames[btnIdx] || `Btn${btnIdx}`;
-            return `Button ${btnIdx} (${name})`;
-        }
-    },
-
-    formatKeyText(bindingVal) {
-        if (bindingVal === undefined || bindingVal === null) return '未設定';
-        const strVal = String(bindingVal);
-        if (strVal.includes('+')) {
-            const parts = strVal.split('+');
-            const p1 = parts[0];
-            const p2 = parts[1] === 'Mouse0' ? 'Mouse0 (左クリック)' : (parts[1] === 'Mouse1' ? 'Mouse1 (中クリック)' : (parts[1] === 'Mouse2' ? 'Mouse2 (右クリック)' : parts[1]));
-            return `${p1} ＋ ${p2}`;
-        } else {
-            if (strVal === 'Mouse0') return 'Mouse0 (左クリック)';
-            if (strVal === 'Mouse1') return 'Mouse1 (中クリック)';
-            if (strVal === 'Mouse2') return 'Mouse2 (右クリック)';
-            return strVal;
-        }
-    },
-
     initUI(onNameChangeCallback, onHostBattleToggle, onReturnToFree) {
         const toggleInstructionsBtn = document.getElementById('toggle-instructions-btn');
         const instructionsBody = document.getElementById('instructions-body');
@@ -241,10 +141,6 @@ const Controls = {
         const settingsBtn = document.getElementById('settings-btn');
         const settingsModal = document.getElementById('settings-modal');
         const closeSettingsBtn = document.getElementById('close-settings-btn');
-        const openKeyconfigBtn = document.getElementById('open-keyconfig-btn');
-        const keyconfigModal = document.getElementById('keyconfig-modal');
-        const closeKeyconfigBtn = document.getElementById('close-keyconfig-btn');
-        const resetKeyconfigBtn = document.getElementById('reset-keyconfig-btn');
 
         const invertYCheckbox = document.getElementById('invert-y-checkbox');
         const antiSicknessCheckbox = document.getElementById('anti-sickness-checkbox');
@@ -291,35 +187,6 @@ const Controls = {
             });
         }
 
-        if (openKeyconfigBtn) {
-            openKeyconfigBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                openKeyconfigBtn.blur();
-                this.isKeyConfigOpen = true;
-                this.clearAllInputs();
-                this.updateKeyConfigUI();
-                if (keyconfigModal) keyconfigModal.style.display = 'block';
-            });
-        }
-
-        if (closeKeyconfigBtn) {
-            closeKeyconfigBtn.addEventListener('click', () => {
-                closeKeyconfigBtn.blur();
-                this.cancelCurrentListening();
-                this.isKeyConfigOpen = false;
-                if (keyconfigModal) keyconfigModal.style.display = 'none';
-            });
-        }
-
-        if (resetKeyconfigBtn) {
-            resetKeyconfigBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                resetKeyconfigBtn.blur();
-                this.cancelCurrentListening();
-                this.resetToDefaultBindings();
-            });
-        }
-
         if (saveNameBtn) {
             saveNameBtn.addEventListener('click', () => {
                 saveNameBtn.blur();
@@ -352,224 +219,14 @@ const Controls = {
                 if (!this.antiSickness && vignetteOverlay) vignetteOverlay.style.opacity = 0;
             });
         }
-
-        this.initKeyConfigListeners();
-    },
-
-    updateKeyConfigUI() {
-        const setTxt = (id, txt) => {
-            const el = document.getElementById(id);
-            if (el) {
-                el.textContent = txt;
-                el.classList.remove('listening');
-            }
-        };
-
-        setTxt('cfg-forward', this.formatKeyText(this.bindings.forward));
-        setTxt('cfg-backward', this.formatKeyText(this.bindings.backward));
-        setTxt('cfg-left', this.formatKeyText(this.bindings.left));
-        setTxt('cfg-right', this.formatKeyText(this.bindings.right));
-        setTxt('cfg-dash', this.formatKeyText(this.bindings.dash));
-        setTxt('cfg-jump', this.formatKeyText(this.bindings.jump));
-        setTxt('cfg-punch', this.formatKeyText(this.bindings.punch));
-        setTxt('cfg-spin-key', this.formatKeyText(this.bindings.spinKey));
-        setTxt('cfg-dive-key', this.formatKeyText(this.bindings.diveKey));
-
-        setTxt('cfg-pad-punch', this.formatPadButtonText(this.bindings.padPunch));
-        setTxt('cfg-pad-spin', this.formatPadButtonText(this.bindings.padSpin));
-        setTxt('cfg-pad-dive', this.formatPadButtonText(this.bindings.padDive));
-        setTxt('cfg-pad-dash', this.formatPadButtonText(this.bindings.padDash));
-        setTxt('cfg-pad-jump', this.formatPadButtonText(this.bindings.padJump));
-        setTxt('cfg-pad-zoom', this.formatPadButtonText(this.bindings.padZoom));
-        setTxt('cfg-pad-move-stick', this.bindings.padMoveStick === 'left' ? '左スティック' : '右スティック');
-        setTxt('cfg-pad-look-stick', this.bindings.padLookStick === 'right' ? '右スティック' : '左スティック');
-    },
-
-    initKeyConfigListeners() {
-        const setupBindingBtn = (elemId, bindingKey) => {
-            const btn = document.getElementById(elemId);
-            if (!btn) return;
-
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.cancelCurrentListening();
-                btn.blur();
-
-                btn.textContent = '入力待ち...';
-                btn.classList.add('listening');
-
-                setTimeout(() => {
-                    let activeModifier = null;
-                    const modifierKeys = ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight'];
-
-                    const keyHandler = (event) => {
-                        event.preventDefault();
-                        const code = event.code;
-
-                        if (modifierKeys.includes(code)) {
-                            activeModifier = code;
-                            btn.textContent = `${code} ＋ [キー/マウスを押してください]`;
-                            return;
-                        }
-
-                        if (activeModifier) {
-                            this.bindings[bindingKey] = `${activeModifier}+${code}`;
-                        } else {
-                            this.bindings[bindingKey] = code;
-                        }
-                        cleanup();
-                    };
-
-                    const mouseHandler = (event) => {
-                        event.preventDefault();
-                        const mouseName = `Mouse${event.button}`;
-
-                        if (activeModifier) {
-                            this.bindings[bindingKey] = `${activeModifier}+${mouseName}`;
-                        } else {
-                            this.bindings[bindingKey] = mouseName;
-                        }
-                        cleanup();
-                    };
-
-                    const cleanup = () => {
-                        window.removeEventListener('keydown', keyHandler);
-                        window.removeEventListener('mousedown', mouseHandler);
-                        this.activeListeningCleanup = null;
-                        btn.classList.remove('listening');
-                        btn.blur();
-                        this.updateKeyConfigUI();
-                        this.saveKeyBindings();
-                    };
-
-                    this.activeListeningCleanup = () => {
-                        window.removeEventListener('keydown', keyHandler);
-                        window.removeEventListener('mousedown', mouseHandler);
-                        btn.classList.remove('listening');
-                        btn.blur();
-                    };
-
-                    window.addEventListener('keydown', keyHandler);
-                    window.addEventListener('mousedown', mouseHandler);
-                }, 60);
-            });
-        };
-
-        setupBindingBtn('cfg-forward', 'forward');
-        setupBindingBtn('cfg-backward', 'backward');
-        setupBindingBtn('cfg-left', 'left');
-        setupBindingBtn('cfg-right', 'right');
-        setupBindingBtn('cfg-dash', 'dash');
-        setupBindingBtn('cfg-jump', 'jump');
-        setupBindingBtn('cfg-punch', 'punch');
-        setupBindingBtn('cfg-spin-key', 'spinKey');
-        setupBindingBtn('cfg-dive-key', 'diveKey');
-
-        const setupPadBtn = (elemId, bindingKey) => {
-            const btn = document.getElementById(elemId);
-            if (!btn) return;
-
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.cancelCurrentListening();
-                btn.blur();
-
-                btn.textContent = 'ボタンを押して...';
-                btn.classList.add('listening');
-
-                setTimeout(() => {
-                    let isNeutral = false;
-                    let heldModifierBtn = null;
-                    const padModifiers = [4, 5, 6, 7];
-
-                    const checkPad = setInterval(() => {
-                        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-                        let activeGp = null;
-                        for (let g of gamepads) {
-                            if (g && g.connected) { activeGp = g; break; }
-                        }
-
-                        if (activeGp) {
-                            const pressedButtons = [];
-                            for (let i = 0; i < activeGp.buttons.length; i++) {
-                                const b = activeGp.buttons[i];
-                                if (b.pressed || (typeof b.value === 'number' && b.value > 0.3)) {
-                                    pressedButtons.push(i);
-                                }
-                            }
-
-                            if (pressedButtons.length === 0) {
-                                isNeutral = true;
-                                return;
-                            }
-
-                            if (!isNeutral) return;
-
-                            const foundMod = pressedButtons.find(idx => padModifiers.includes(idx));
-                            const foundMain = pressedButtons.find(idx => !padModifiers.includes(idx));
-
-                            if (foundMod !== undefined && foundMain !== undefined) {
-                                this.bindings[bindingKey] = `${foundMod}+${foundMain}`;
-                                cleanup();
-                                return;
-                            } else if (foundMod !== undefined && !heldModifierBtn) {
-                                heldModifierBtn = foundMod;
-                                const mName = this.padButtonNames[foundMod] || `Btn${foundMod}`;
-                                btn.textContent = `${mName} ＋ [ボタン待ち...]`;
-                            } else if (foundMain !== undefined && !heldModifierBtn) {
-                                this.bindings[bindingKey] = foundMain;
-                                cleanup();
-                                return;
-                            }
-                        }
-                    }, 40);
-
-                    const cleanup = () => {
-                        clearInterval(checkPad);
-                        this.activeListeningCleanup = null;
-                        btn.classList.remove('listening');
-                        btn.blur();
-                        this.updateKeyConfigUI();
-                        this.saveKeyBindings();
-                    };
-
-                    this.activeListeningCleanup = () => {
-                        clearInterval(checkPad);
-                        btn.classList.remove('listening');
-                        btn.blur();
-                    };
-                }, 120);
-            });
-        };
-
-        setupPadBtn('cfg-pad-punch', 'padPunch');
-        setupPadBtn('cfg-pad-spin', 'padSpin');
-        setupPadBtn('cfg-pad-dive', 'padDive');
-        setupPadBtn('cfg-pad-dash', 'padDash');
-        setupPadBtn('cfg-pad-jump', 'padJump');
-        setupPadBtn('cfg-pad-zoom', 'padZoom');
-
-        document.getElementById('cfg-pad-move-stick')?.addEventListener('click', () => {
-            this.bindings.padMoveStick = this.bindings.padMoveStick === 'left' ? 'right' : 'left';
-            this.bindings.padLookStick = this.bindings.padMoveStick === 'left' ? 'right' : 'left';
-            this.updateKeyConfigUI();
-            this.saveKeyBindings();
-        });
-        document.getElementById('cfg-pad-look-stick')?.addEventListener('click', () => {
-            this.bindings.padLookStick = this.bindings.padLookStick === 'right' ? 'left' : 'right';
-            this.bindings.padMoveStick = this.bindings.padLookStick === 'right' ? 'left' : 'right';
-            this.updateKeyConfigUI();
-            this.saveKeyBindings();
-        });
     },
 
     initEventListeners() {
         window.addEventListener('contextmenu', (e) => e.preventDefault());
 
         window.addEventListener('keydown', (e) => {
-            // 【項目3改善】名前入力などのインプット要素にフォーカスがあるときだけ文字キー移動を抑止
             if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-            if (this.isKeyConfigOpen) return;
+            if (KeyConfig.isKeyConfigOpen) return;
             this.activeKeys[e.code] = true;
         });
 
@@ -578,13 +235,12 @@ const Controls = {
         });
 
         window.addEventListener('mousedown', (e) => {
-            // UIクリック時のパンチ誤爆・視点ドラッグ暴発防止（canvas外クリックは完全無視）
             if (e.target && e.target.tagName !== 'CANVAS') return;
-            if (this.isKeyConfigOpen) return;
+            if (KeyConfig.isKeyConfigOpen) return;
 
             this.activeMouseButtons[e.button] = true;
 
-            const lookBtn = Number(this.bindings.lookDrag !== undefined ? this.bindings.lookDrag : 2);
+            const lookBtn = Number(KeyConfig.bindings.lookDrag !== undefined ? KeyConfig.bindings.lookDrag : 2);
             if (e.button === lookBtn || e.button === 2) {
                 this.isDragging = true;
                 this.previousMousePosition = { x: e.clientX, y: e.clientY };
@@ -597,7 +253,7 @@ const Controls = {
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (!this.isDragging || this.isKeyConfigOpen) return;
+            if (!this.isDragging || KeyConfig.isKeyConfigOpen) return;
 
             const deltaX = e.clientX - this.previousMousePosition.x;
             const deltaY = e.clientY - this.previousMousePosition.y;
@@ -613,7 +269,7 @@ const Controls = {
         });
 
         window.addEventListener('wheel', (e) => {
-            if (this.isKeyConfigOpen) return;
+            if (KeyConfig.isKeyConfigOpen) return;
             this.cameraDistance += e.deltaY * 0.008;
             this.cameraDistance = Math.max(this.minDistance, Math.min(this.maxDistance, this.cameraDistance));
         }, { passive: true });
@@ -674,45 +330,6 @@ const Controls = {
         }
     },
 
-    isKeyOrCombinationPressed(bindingVal) {
-        if (bindingVal === undefined || bindingVal === null) return false;
-
-        const checkSingle = (val) => {
-            if (val === undefined || val === null) return false;
-            const str = String(val);
-            if (str.startsWith('Mouse')) {
-                const btnIdx = parseInt(str.replace('Mouse', ''), 10);
-                return !!this.activeMouseButtons[btnIdx];
-            }
-            return !!this.activeKeys[str];
-        };
-
-        const strVal = String(bindingVal);
-        if (strVal.includes('+')) {
-            const [mod, key] = strVal.split('+');
-            return checkSingle(mod) && checkSingle(key);
-        } else {
-            return checkSingle(strVal);
-        }
-    },
-
-    isPadButtonPressed(gp, bindingVal) {
-        if (!gp || bindingVal === undefined || bindingVal === null) return false;
-
-        const checkBtn = (idx) => {
-            const b = gp.buttons[idx];
-            return b && (b.pressed || (typeof b.value === 'number' && b.value > 0.3));
-        };
-
-        const strVal = String(bindingVal);
-        if (strVal.includes('+')) {
-            const [mod, main] = strVal.split('+').map(Number);
-            return checkBtn(mod) && checkBtn(main);
-        } else {
-            return checkBtn(Number(strVal));
-        }
-    },
-
     getInputs(delta) {
         if (this.spinStacks < this.spinMaxStacks) {
             this.spinCooldownTimer -= delta;
@@ -770,9 +387,9 @@ const Controls = {
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
         const gp = gamepads[0] || gamepads[1] || gamepads[2] || gamepads[3];
 
-        if (gp && !this.isKeyConfigOpen) {
-            const lookAxes = this.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
-            const isZoomHolding = this.isPadButtonPressed(gp, this.bindings.padZoom);
+        if (gp && !KeyConfig.isKeyConfigOpen) {
+            const lookAxes = KeyConfig.bindings.padLookStick === 'right' ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
+            const isZoomHolding = KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padZoom);
             const stickRX = this.applyDeadzone(lookAxes[0]);
             const stickRY = this.applyDeadzone(lookAxes[1]);
 
@@ -804,15 +421,14 @@ const Controls = {
             this.currentPitch = this.targetPitch;
         }
 
-        let isJumpKeyCurrentlyHeld = this.isKeyOrCombinationPressed(this.bindings.jump);
+        let isJumpKeyCurrentlyHeld = KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.jump);
         let isPadJumpCurrentlyHeld = false;
         if (gp) {
-            if (this.isPadButtonPressed(gp, this.bindings.padJump)) isPadJumpCurrentlyHeld = true;
+            if (KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padJump)) isPadJumpCurrentlyHeld = true;
         }
         const isJumpAnyHeld = isJumpKeyCurrentlyHeld || isPadJumpCurrentlyHeld;
 
-        // 【項目3改善】仕様書11-2通り、完全遮断は「キーコンフィグ画面」のみ
-        if (this.isKeyConfigOpen) {
+        if (KeyConfig.isKeyConfigOpen) {
             this.prevJumpHeld = isJumpAnyHeld;
             this.cancelPunchCharge();
             return {
@@ -835,35 +451,34 @@ const Controls = {
         let inputX = 0;
         let inputZ = 0;
 
-        // 名前入力欄フォーカス中は移動キーを拾わない
         const isTyping = document.activeElement && document.activeElement.tagName === 'INPUT';
         if (!isTyping) {
-            if (this.isKeyOrCombinationPressed(this.bindings.forward)) inputZ += 1;
-            if (this.isKeyOrCombinationPressed(this.bindings.backward)) inputZ -= 1;
-            if (this.isKeyOrCombinationPressed(this.bindings.left)) inputX -= 1;
-            if (this.isKeyOrCombinationPressed(this.bindings.right)) inputX += 1;
+            if (KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.forward)) inputZ += 1;
+            if (KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.backward)) inputZ -= 1;
+            if (KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.left)) inputX -= 1;
+            if (KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.right)) inputX += 1;
         }
 
-        let isDashRequested = this.isKeyOrCombinationPressed(this.bindings.dash);
-        let isPunchKeyPressed = this.isKeyOrCombinationPressed(this.bindings.punch);
-        let isSpinKeyPressed = this.isKeyOrCombinationPressed(this.bindings.spinKey);
-        let isDiveKeyPressed = this.isKeyOrCombinationPressed(this.bindings.diveKey);
+        let isDashRequested = KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.dash);
+        let isPunchKeyPressed = KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.punch);
+        let isSpinKeyPressed = KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.spinKey);
+        let isDiveKeyPressed = KeyConfig.isKeyOrCombinationPressed(this.activeKeys, this.activeMouseButtons, KeyConfig.bindings.diveKey);
 
         let isPadPunchPressed = false;
         let isPadSpinPressed = false;
         let isPadDivePressed = false;
 
         if (gp) {
-            const moveAxes = this.bindings.padMoveStick === 'left' ? [gp.axes[0], gp.axes[1]] : [gp.axes[2], gp.axes[3]];
+            const moveAxes = KeyConfig.bindings.padMoveStick === 'left' ? [gp.axes[0], gp.axes[1]] : [gp.axes[2], gp.axes[3]];
             const stickLX = this.applyDeadzone(moveAxes[0]);
             const stickLY = this.applyDeadzone(moveAxes[1]);
             if (stickLX !== 0) inputX = stickLX;
             if (stickLY !== 0) inputZ = -stickLY;
 
-            if (this.isPadButtonPressed(gp, this.bindings.padDash)) isDashRequested = true;
-            if (this.isPadButtonPressed(gp, this.bindings.padPunch)) isPadPunchPressed = true;
-            if (this.isPadButtonPressed(gp, this.bindings.padSpin)) isPadSpinPressed = true;
-            if (this.isPadButtonPressed(gp, this.bindings.padDive)) isPadDivePressed = true;
+            if (KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padDash)) isDashRequested = true;
+            if (KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padPunch)) isPadPunchPressed = true;
+            if (KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padSpin)) isPadSpinPressed = true;
+            if (KeyConfig.isPadButtonPressed(gp, KeyConfig.bindings.padDive)) isPadDivePressed = true;
         }
 
         const jumpJustTriggered = isJumpAnyHeld && !this.prevJumpHeld;

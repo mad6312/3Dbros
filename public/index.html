@@ -459,9 +459,7 @@
             background: #c82333;
         }
 
-        /* ===================================================
-           【新機能：画面上部アナウンステキスト】
-        =================================================== */
+        /* 画面上部アナウンステキスト */
         #battle-announce-banner {
             display: none;
             position: absolute;
@@ -481,9 +479,7 @@
             border-bottom: 1px solid rgba(255, 204, 0, 0.5);
         }
 
-        /* ===================================================
-           【改良：大迫力・躍動感あるカウントダウン演出】
-        =================================================== */
+        /* 大迫力カウントダウン演出 */
         #battle-countdown-overlay {
             display: none;
             position: absolute;
@@ -717,7 +713,7 @@
         </div>
     </div>
 
-    <!-- リザルト画面モーダル（ボタンテキストを「閉じる」に変更） -->
+    <!-- リザルト画面モーダル -->
     <div id="battle-result-modal">
         <h2 id="result-modal-header">🏆 BATTLE RESULT</h2>
         <div id="result-winner-title">Winner: Player_XXXX</div>
@@ -728,10 +724,13 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
 
+    <!-- 【モジュール読み込み順序】 -->
     <script src="character.js"></script>
-    <script src="controls.js"></script>
     <script src="stage.js"></script>
     <script src="combat.js"></script>
+    <script src="keyconfig.js"></script>
+    <script src="controls.js"></script>
+    <script src="network.js"></script>
     <script src="main.js"></script>
 </body>
 
